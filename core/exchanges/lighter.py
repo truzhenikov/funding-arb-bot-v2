@@ -1,0 +1,167 @@
+import logging
+import time
+
+import httpx
+
+from .base import BaseExchangeExecutor
+
+logger = logging.getLogger(__name__)
+
+LIGHTER_BASE_URL = "https://mainnet.zklighter.elliot.ai"
+
+
+class LighterExecutor(BaseExchangeExecutor):
+    """Клиент для торговли на Lighter (ZK order book DEX)."""
+
+    name = "Lighter"
+    fee_rate = 0.0  # 0% комиссия
+
+    def __init__(self, api_private_key: str, api_key_index: int, account_index: int):
+        self._api_private_key = api_private_key
+        self._api_key_index = api_key_index
+        self._account_index = account_index
+        self._signer = None
+        self._markets: dict = {}
+
+    def _get_signer(self):
+        if self._signer is None:
+            try:
+                import lighter
+                self._signer = lighter.SignerClient(
+                    url=LIGHTER_BASE_URL,
+                    api_private_keys={self._api_key_index: self._api_private_key},
+                    account_index=self._account_index,
+                )
+            except ImportError:
+                raise RuntimeError("lighter-sdk не установлен: pip install lighter-sdk")
+        return self._signer
+
+    async def _ensure_markets(self):
+        if self._markets:
+            return
+        signer = self._get_signer()
+        result = await signer.order_api.order_books()
+        for ob in (result.order_books or []):
+            self._markets[ob.symbol.upper()] = ob
+        logger.info(f"Lighter: загружено {len(self._markets)} рынков")
+
+    async def get_mark_price(self, symbol: str) -> float:
+        signer = self._get_signer()
+        stats = await signer.order_api.exchange_stats()
+        for ob in (stats.order_book_stats or []):
+            if ob.symbol.upper() == symbol.upper():
+                return float(ob.last_trade_price)
+        raise ValueError(f"Цена {symbol} не найдена на Lighter")
+
+    async def market_open(self, symbol: str, is_long: bool, size_usd: float) -> dict:
+        signer = self._get_signer()
+        await self._ensure_markets()
+
+        market = self._markets.get(symbol.upper())
+        if not market:
+            raise ValueError(f"Рынок {symbol} не найден на Lighter")
+
+        market_index = int(market.market_id)
+        price = await self.get_mark_price(symbol)
+        client_order_id = int(time.time() * 1000) % 1_000_000
+
+        logger.info(
+            f"Lighter: {'лонг' if is_long else 'шорт'} {symbol}, "
+            f"market_id={market_index}, ${size_usd}, цена={price}"
+        )
+
+        tx, tx_hash, err = await signer.create_market_order_quote_amount(
+            market_index=market_index,
+            client_order_index=client_order_id,
+            quote_amount=size_usd,
+            max_slippage=0.10,
+            is_ask=not is_long,
+        )
+
+        if err:
+            raise RuntimeError(f"Lighter ошибка открытия {symbol}: {err}")
+
+        logger.info(f"Lighter: ордер исполнен {symbol}, tx={tx_hash}")
+        return {
+            "tx_hash": str(tx_hash),
+            "size": size_usd / price,
+            "size_usd": size_usd,
+            "price": price,
+        }
+
+    async def market_close(self, symbol: str, size: float = 0, was_long: bool = True) -> dict:
+        signer = self._get_signer()
+        await self._ensure_markets()
+
+        market = self._markets.get(symbol.upper())
+        if not market:
+            raise ValueError(f"Рынок {symbol} не найден на Lighter")
+
+        market_index = int(market.market_id)
+        price = await self.get_mark_price(symbol)
+        size_usd = size * price if size > 0 else 0
+        client_order_id = int(time.time() * 1000) % 1_000_000
+
+        logger.info(f"Lighter: закрытие {symbol}, market_id={market_index}, ~${size_usd:.2f}")
+
+        tx, tx_hash, err = await signer.create_market_order_quote_amount(
+            market_index=market_index,
+            client_order_index=client_order_id,
+            quote_amount=size_usd,
+            max_slippage=0.15,
+            is_ask=was_long,
+            reduce_only=True,
+        )
+
+        if err:
+            err_str = str(err).lower()
+            safe_errors = ("no position", "position not found", "nothing to close",
+                           "reduce only", "no open position")
+            if any(s in err_str for s in safe_errors):
+                logger.warning(f"Lighter закрытие {symbol}: позиция уже закрыта ({err})")
+                return {"tx_hash": "", "symbol": symbol, "price": price}
+            raise RuntimeError(f"Lighter ошибка закрытия {symbol}: {err}")
+
+        logger.info(f"Lighter: позиция {symbol} закрыта, tx={tx_hash}")
+        return {"tx_hash": str(tx_hash), "symbol": symbol, "price": price}
+
+    async def get_positions(self) -> list[dict] | None:
+        try:
+            async with httpx.AsyncClient(timeout=15) as client:
+                resp = await client.get(
+                    f"{LIGHTER_BASE_URL}/v1/accounts",
+                    params={"blockchain_index": self._account_index},
+                )
+            if resp.status_code != 200:
+                logger.warning(f"Lighter positions: HTTP {resp.status_code}: {resp.text[:200]}")
+                return None
+            data = resp.json()
+
+            account = data.get("account") or data
+            raw_positions = (
+                account.get("perp_positions")
+                or account.get("positions")
+                or account.get("open_positions")
+                or []
+            )
+
+            positions = []
+            for pos in raw_positions:
+                qty_raw = pos.get("quantity") or pos.get("size") or 0
+                qty = float(qty_raw)
+                if qty == 0:
+                    continue
+                symbol = (
+                    pos.get("market_symbol") or pos.get("symbol") or ""
+                ).replace("-PERP", "").replace("/USDC", "").upper()
+                positions.append({"symbol": symbol, "quantity": qty})
+
+            return positions
+
+        except Exception as e:
+            logger.warning(f"Lighter get_positions ошибка: {e}")
+            return None
+
+    async def close(self):
+        if self._signer:
+            await self._signer.close()
