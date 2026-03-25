@@ -28,9 +28,10 @@ LIGHTER_ACCOUNT_INDEX = int(os.getenv("LIGHTER_ACCOUNT_INDEX", "0"))
 HYPERLIQUID_PRIVATE_KEY = os.getenv("HYPERLIQUID_PRIVATE_KEY", "")
 WALLET_ADDRESS = os.getenv("WALLET_ADDRESS", "")
 
-# GRVT
+# GRVT (EIP-712 signing)
 GRVT_API_KEY = os.getenv("GRVT_API_KEY", "")
-GRVT_PRIVATE_KEY = os.getenv("GRVT_PRIVATE_KEY", "")
+GRVT_PRIVATE_KEY = os.getenv("GRVT_PRIVATE_KEY", "")          # ETH private key для подписи ордеров
+GRVT_TRADING_ACCOUNT_ID = os.getenv("GRVT_TRADING_ACCOUNT_ID", "")  # Sub-account ID
 
 # Aster
 ASTER_API_KEY = os.getenv("ASTER_API_KEY", "")

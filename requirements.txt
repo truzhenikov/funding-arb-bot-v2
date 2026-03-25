@@ -7,3 +7,5 @@ cryptography>=42.0.0
 lighter-sdk
 hyperliquid-python-sdk
 eth-account>=0.11.0
+grvt-pysdk
+aster-connector-python

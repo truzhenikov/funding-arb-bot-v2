@@ -45,7 +45,7 @@ def get_executor(exchange_name: str) -> BaseExchangeExecutor:
         from core.exchanges.grvt import GRVTExecutor
         if not cfg.GRVT_API_KEY:
             raise RuntimeError("GRVT API ключ не задан в .env")
-        return GRVTExecutor(cfg.GRVT_API_KEY, cfg.GRVT_PRIVATE_KEY)
+        return GRVTExecutor(cfg.GRVT_API_KEY, cfg.GRVT_PRIVATE_KEY, cfg.GRVT_TRADING_ACCOUNT_ID)
 
     elif exchange_name == "Aster":
         from core.exchanges.aster import AsterExecutor
