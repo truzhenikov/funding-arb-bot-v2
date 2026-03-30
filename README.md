@@ -248,7 +248,7 @@ python main.py
 sudo nano /etc/systemd/system/funding-arb-bot.service
 ```
 
-Вставь содержимое (замени `ВАШ_ПОЛЬЗОВАТЕЛЬ` на свой логин, например `ubuntu` или `r2d2`):
+Вставь содержимое (замени `ВАШ_ПОЛЬЗОВАТЕЛЬ` на свой логин — обычно это `root`):
 
 ```ini
 [Unit]
