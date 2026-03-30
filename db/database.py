@@ -159,6 +159,26 @@ async def get_positions_by_pair(pair_id: str) -> list[dict]:
             return [dict(row) for row in await cursor.fetchall()]
 
 
+async def get_position_by_id(pos_id) -> dict | None:
+    """Получает одну позицию по ID."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT * FROM positions WHERE id = ?", (pos_id,)
+        ) as cursor:
+            row = await cursor.fetchone()
+            return dict(row) if row else None
+
+
+async def mark_position_closed(pos_id):
+    """Помечает одну позицию как закрытую."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "UPDATE positions SET status = 'closed' WHERE id = ?", (pos_id,)
+        )
+        await db.commit()
+
+
 async def save_funding_snapshot(rates_by_exchange: dict):
     """Сохраняет снапшот фандинга со всех бирж."""
     now = time.time()

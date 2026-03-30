@@ -48,6 +48,20 @@ class GRVTExecutor(BaseExchangeExecutor):
         """BTC → BTC_USDT_Perp"""
         return f"{symbol.upper()}_USDT_Perp"
 
+    async def _get_size_precision(self, instrument: str) -> int:
+        """Возвращает кол-во знаков после запятой для округления размера ордера.
+        Берёт min_size инструмента и считает количество значащих десятичных знаков."""
+        api = await self._get_api()
+        market = api.markets.get(instrument, {})
+        min_size = market.get("min_size")
+        if min_size:
+            # min_size=0.1 → 1, min_size=0.01 → 2, min_size=1 → 0
+            min_size_str = str(min_size)
+            if '.' in min_size_str:
+                return len(min_size_str.rstrip('0').split('.')[1])
+            return 0
+        return int(market.get("base_decimals", 9))
+
     async def get_mark_price(self, symbol: str) -> float:
         api = await self._get_api()
         instrument = self._to_instrument(symbol)
@@ -64,16 +78,23 @@ class GRVTExecutor(BaseExchangeExecutor):
         price = await self.get_mark_price(symbol)
         size = size_usd / price
 
+        # Округляем до точности инструмента (base_decimals), иначе подпись не совпадёт
+        decimals = await self._get_size_precision(instrument)
+        size = round(size, decimals)
+
         side = "buy" if is_long else "sell"
 
-        logger.info(f"GRVT: {'лонг' if is_long else 'шорт'} {symbol}, ${size_usd}, size={size:.6f}")
+        logger.info(f"GRVT: {'лонг' if is_long else 'шорт'} {symbol}, ${size_usd}, size={size:.{decimals}f}")
 
         order = await api.create_order(
             symbol=instrument,
             order_type="market",
             side=side,
-            amount=Decimal(str(round(size, 8))),
+            amount=Decimal(str(size)),
         )
+
+        if not order:
+            raise RuntimeError(f"GRVT: ордер {symbol} отклонён биржей (пустой ответ от API)")
 
         # Парсим результат
         filled_size = float(order.get("filled") or order.get("amount") or size)
@@ -84,6 +105,40 @@ class GRVTExecutor(BaseExchangeExecutor):
             "order_id": order.get("id"),
             "size": filled_size,
             "size_usd": size_usd,
+            "price": filled_price,
+        }
+
+    async def market_open_by_qty(self, symbol: str, is_long: bool, quantity: float) -> dict:
+        """Открывает позицию по точному количеству (для синхронизации ног)."""
+        api = await self._get_api()
+        instrument = self._to_instrument(symbol)
+        price = await self.get_mark_price(symbol)
+        side = "buy" if is_long else "sell"
+
+        # Округляем до точности инструмента (base_decimals), иначе подпись не совпадёт
+        decimals = await self._get_size_precision(instrument)
+        quantity = round(quantity, decimals)
+
+        logger.info(f"GRVT: {'лонг' if is_long else 'шорт'} {symbol}, qty={quantity:.{decimals}f}")
+
+        order = await api.create_order(
+            symbol=instrument,
+            order_type="market",
+            side=side,
+            amount=Decimal(str(quantity)),
+        )
+
+        if not order:
+            raise RuntimeError(f"GRVT: ордер {symbol} отклонён биржей (пустой ответ от API)")
+
+        filled_size = float(order.get("filled") or order.get("amount") or quantity)
+        filled_price = float(order.get("average") or order.get("price") or price)
+
+        logger.info(f"GRVT: ордер исполнен {symbol}, size={filled_size}, price={filled_price}")
+        return {
+            "order_id": order.get("id"),
+            "size": filled_size,
+            "size_usd": filled_size * filled_price,
             "price": filled_price,
         }
 
@@ -101,15 +156,22 @@ class GRVTExecutor(BaseExchangeExecutor):
             logger.info(f"GRVT: позиция {symbol} уже закрыта")
             return {"symbol": symbol, "price": price, "fee": 0}
 
+        # Округляем до точности инструмента
+        decimals = await self._get_size_precision(instrument)
+        close_size = round(close_size, decimals)
+
         logger.info(f"GRVT: закрытие {symbol}, size={close_size}")
 
         order = await api.create_order(
             symbol=instrument,
             order_type="market",
             side=side,
-            amount=Decimal(str(round(close_size, 8))),
+            amount=Decimal(str(close_size)),
             params={"reduce_only": True},
         )
+
+        if not order:
+            raise RuntimeError(f"GRVT: закрытие {symbol} отклонено биржей (пустой ответ от API)")
 
         exit_price = float(order.get("average") or order.get("price") or price)
         logger.info(f"GRVT: позиция {symbol} закрыта, price={exit_price}")
@@ -130,17 +192,26 @@ class GRVTExecutor(BaseExchangeExecutor):
             api = await self._get_api()
             raw = await api.fetch_positions()
 
+            # SDK может молча вернуть [] при ошибке авторизации — retry один раз
+            if not raw:
+                import asyncio
+                await asyncio.sleep(2)
+                # Сбрасываем SDK чтобы переавторизовался
+                self._api = None
+                self._markets_loaded = False
+                api = await self._get_api()
+                raw = await api.fetch_positions()
+                if not raw:
+                    logger.warning("GRVT get_positions: пустой результат после retry — возможно ошибка авторизации")
+                    return None
+
             positions = []
             for pos in raw:
-                symbol_raw = pos.get("symbol") or pos.get("instrument") or ""
+                symbol_raw = pos.get("instrument") or pos.get("symbol") or ""
                 # BTC_USDT_Perp → BTC
                 symbol = symbol_raw.split("_")[0].upper() if "_" in symbol_raw else symbol_raw
-                qty = float(pos.get("contracts") or pos.get("amount") or 0)
-                side = pos.get("side", "")
-                if side == "short":
-                    qty = -abs(qty)
-                elif side == "long":
-                    qty = abs(qty)
+                # GRVT возвращает "size" со знаком: минус = short, плюс = long
+                qty = float(pos.get("size") or pos.get("contracts") or pos.get("amount") or 0)
                 if qty != 0:
                     positions.append({"symbol": symbol, "quantity": qty})
             return positions

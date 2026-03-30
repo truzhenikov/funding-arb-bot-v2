@@ -1,5 +1,7 @@
+import asyncio
 import logging
 
+import httpx
 import eth_account
 from hyperliquid.exchange import Exchange
 from hyperliquid.info import Info
@@ -39,7 +41,7 @@ class HyperliquidExecutor(BaseExchangeExecutor):
     async def _ensure_meta(self):
         if self._meta is None:
             info = self._get_info()
-            self._meta = info.meta()
+            self._meta = await asyncio.to_thread(info.meta)
 
     def _get_sz_decimals(self, symbol: str) -> int:
         if self._meta is None:
@@ -51,7 +53,7 @@ class HyperliquidExecutor(BaseExchangeExecutor):
 
     async def get_mark_price(self, symbol: str) -> float:
         info = self._get_info()
-        all_mids = info.all_mids()
+        all_mids = await asyncio.to_thread(info.all_mids)
         price = float(all_mids.get(symbol, 0))
         if price == 0:
             raise ValueError(f"Не удалось получить цену {symbol} на Hyperliquid")
@@ -65,7 +67,7 @@ class HyperliquidExecutor(BaseExchangeExecutor):
         price = await self.get_mark_price(symbol)
         size = round(size_usd / price, sz_decimals)
 
-        result = exchange.market_open(symbol, is_long, size, None, 0.01)
+        result = await asyncio.to_thread(exchange.market_open, symbol, is_long, size, None, 0.01)
         if result.get("status") != "ok":
             raise RuntimeError(f"Hyperliquid ошибка открытия: {result}")
 
@@ -77,21 +79,54 @@ class HyperliquidExecutor(BaseExchangeExecutor):
             "price": price,
         }
 
+    async def market_open_by_qty(self, symbol: str, is_long: bool, quantity: float) -> dict:
+        """Открывает позицию по точному количеству (для синхронизации ног)."""
+        await self._ensure_meta()
+        exchange = self._get_exchange()
+
+        sz_decimals = self._get_sz_decimals(symbol)
+        price = await self.get_mark_price(symbol)
+        size = round(quantity, sz_decimals)
+
+        result = await asyncio.to_thread(exchange.market_open, symbol, is_long, size, None, 0.01)
+        if result.get("status") != "ok":
+            raise RuntimeError(f"Hyperliquid ошибка открытия: {result}")
+
+        logger.info(f"Hyperliquid: открыт {'лонг' if is_long else 'шорт'} {symbol}, "
+                    f"size={size}, price={price}")
+        return {
+            "size": size,
+            "size_usd": size * price,
+            "price": price,
+        }
+
     async def market_close(self, symbol: str, size: float = 0, was_long: bool = True) -> dict:
+        await self._ensure_meta()
         exchange = self._get_exchange()
         price = await self.get_mark_price(symbol)
 
-        result = exchange.market_close(symbol)
-        if result.get("status") != "ok":
-            raise RuntimeError(f"Hyperliquid ошибка закрытия {symbol}: {result}")
+        if size > 0:
+            # Закрываем конкретный размер через обратный ордер
+            sz_decimals = self._get_sz_decimals(symbol)
+            close_size = round(size, sz_decimals)
+            is_buy = not was_long  # если был лонг → sell, если шорт → buy
+            result = await asyncio.to_thread(exchange.market_open, symbol, is_buy, close_size, None, 0.01)
+            if result.get("status") != "ok":
+                raise RuntimeError(f"Hyperliquid ошибка закрытия {symbol}: {result}")
+            logger.info(f"Hyperliquid: закрыта часть {symbol}, size={close_size}")
+        else:
+            # Закрываем всю позицию
+            result = await asyncio.to_thread(exchange.market_close, symbol)
+            if result.get("status") != "ok":
+                raise RuntimeError(f"Hyperliquid ошибка закрытия {symbol}: {result}")
+            logger.info(f"Hyperliquid: позиция {symbol} закрыта полностью")
 
-        logger.info(f"Hyperliquid: позиция {symbol} закрыта")
         return {"symbol": symbol, "price": price, "fee": 0}
 
     async def get_positions(self) -> list[dict] | None:
         try:
             info = self._get_info()
-            user_state = info.user_state(self._wallet_address)
+            user_state = await asyncio.to_thread(info.user_state, self._wallet_address)
             positions = []
             for pos in user_state.get("assetPositions", []):
                 item = pos.get("position", {})
@@ -106,10 +141,22 @@ class HyperliquidExecutor(BaseExchangeExecutor):
 
     async def get_balance(self) -> float | None:
         try:
-            info = self._get_info()
-            user_state = info.user_state(self._wallet_address)
-            margin = user_state.get("marginSummary", {})
-            return float(margin.get("accountValue", 0))
+            total = 0.0
+            async with httpx.AsyncClient(timeout=10) as c:
+                # Перп баланс
+                r = await c.post("https://api.hyperliquid.xyz/info", json={
+                    "type": "clearinghouseState", "user": self._wallet_address
+                })
+                margin = r.json().get("marginSummary", {})
+                total += float(margin.get("accountValue", 0))
+                # Спот баланс
+                r2 = await c.post("https://api.hyperliquid.xyz/info", json={
+                    "type": "spotClearinghouseState", "user": self._wallet_address
+                })
+                for b in r2.json().get("balances", []):
+                    if b.get("coin") == "USDC":
+                        total += float(b.get("total", 0))
+            return total
         except Exception as e:
             logger.warning(f"Hyperliquid get_balance ошибка: {e}")
             return None

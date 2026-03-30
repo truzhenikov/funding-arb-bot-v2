@@ -1,3 +1,4 @@
+import asyncio
 import httpx
 import logging
 from .base import BaseScanner, FundingRate
@@ -11,36 +12,37 @@ class GRVTScanner(BaseScanner):
     """
     GRVT (Gravity) — ZK-powered derivatives exchange.
     Публичный API, без авторизации для чтения.
-    Все запросы — POST с JSON body.
+
+    Важно: GRVT возвращает funding_rate уже в процентах
+    (0.01 = 0.01% за период, НЕ 1%).
+    Интервал (4h/8h) берём из all_instruments, в тикере его нет.
     """
 
     exchange_name = "GRVT"
 
-    async def _get_perp_instruments(self) -> list[str]:
-        """Возвращает список всех перп инструментов (BTC_USDT_Perp и т.д.)."""
+    async def _get_instruments_map(self) -> dict[str, int]:
+        """Возвращает {instrument_name: funding_interval_hours}."""
         try:
             async with httpx.AsyncClient(timeout=15) as client:
-                resp = await client.post(
-                    f"{MARKET_DATA_URL}/full/v1/all_instruments",
-                    json={},
-                )
+                resp = await client.post(f"{MARKET_DATA_URL}/full/v1/all_instruments", json={})
                 resp.raise_for_status()
                 data = resp.json()
 
-            instruments = []
-            for item in data.get("result", data.get("instruments", [])):
-                # instrument_name: "BTC_USDT_Perp"
-                name = item.get("instrument") or item.get("instrument_name") or ""
-                kind = item.get("instrument_type") or item.get("kind") or ""
-                if "PERP" in kind.upper() or name.endswith("_Perp"):
-                    instruments.append(name)
-            return instruments
+            result = {}
+            for item in data.get("result", []):
+                name = item.get("instrument", "")
+                kind = item.get("kind", "")
+                if not (kind == "PERPETUAL" or name.endswith("_Perp")):
+                    continue
+                interval = int(item.get("funding_interval_hours") or 8)
+                result[name] = interval
+            return result
         except Exception as e:
             logger.error(f"GRVT: ошибка получения инструментов: {e}")
-            return []
+            return {}
 
     async def _get_ticker(self, instrument: str) -> dict | None:
-        """Получает тикер для одного инструмента (включает funding_rate_curr)."""
+        """Получает тикер для одного инструмента."""
         try:
             async with httpx.AsyncClient(timeout=10) as client:
                 resp = await client.post(
@@ -49,21 +51,20 @@ class GRVTScanner(BaseScanner):
                 )
                 if resp.status_code != 200:
                     return None
-                data = resp.json()
-                return data.get("result", data)
+                return resp.json().get("result")
         except Exception:
             return None
 
     async def get_funding_rates(self) -> list[FundingRate]:
-        instruments = await self._get_perp_instruments()
-        if not instruments:
+        # Загружаем инструменты и их интервалы
+        instruments_map = await self._get_instruments_map()
+        if not instruments_map:
             logger.warning("GRVT: нет перп инструментов")
             return []
 
-        # Запрашиваем тикеры параллельно (пачками по 20 чтобы не перегружать)
-        import asyncio
+        instruments = list(instruments_map.keys())
         rates = []
-        batch_size = 20
+        batch_size = 50
 
         for i in range(0, len(instruments), batch_size):
             batch = instruments[i:i + batch_size]
@@ -77,29 +78,32 @@ class GRVTScanner(BaseScanner):
                     continue
 
                 try:
-                    # instrument: "BTC_USDT_Perp" → symbol: "BTC"
                     symbol = instrument.split("_")[0].upper()
 
-                    # funding_rate_curr — текущая ставка (в долях)
-                    funding_rate = float(result.get("funding_rate_curr") or result.get("funding_rate") or 0)
-                    if funding_rate == 0:
+                    # funding_rate на GRVT — уже в % за период
+                    # (например 0.01 = 0.01% за 8ч, а не 1%)
+                    funding_rate_pct = float(
+                        result.get("funding_rate_8h_curr")
+                        or result.get("funding_rate")
+                        or 0
+                    )
+                    if funding_rate_pct == 0:
                         continue
+
+                    interval_hours = instruments_map.get(instrument, 8)
+
+                    # Переводим в долю за час для единообразия с другими биржами
+                    # funding_rate_pct% за interval_hours → доля/час
+                    hourly_rate = funding_rate_pct / 100 / interval_hours
+                    apr = hourly_rate * 24 * 365 * 100
 
                     mark_price = float(result.get("mark_price") or 0)
                     open_interest = float(result.get("open_interest") or 0)
-                    # OI в контрактах → USD
                     oi_usd = open_interest * mark_price if mark_price else 0
 
-                    # Объём за 24ч
-                    volume_usd = float(result.get("quote_volume") or result.get("volume_24h_quote") or 0)
-
-                    # GRVT фандинг может быть 1h/4h/8h, по умолчанию 8h
-                    # funding_rate_curr — ставка за текущий интервал
-                    # Для APR: предполагаем часовую ставку
-                    # Если ставка за 8ч — делим на 8
-                    funding_interval = int(result.get("funding_interval_hours") or 8)
-                    hourly_rate = funding_rate / funding_interval
-                    apr = hourly_rate * 24 * 365 * 100
+                    volume_usd = float(
+                        result.get("buy_volume_24h_q", 0) or 0
+                    ) + float(result.get("sell_volume_24h_q", 0) or 0)
 
                     rates.append(FundingRate(
                         exchange="GRVT",

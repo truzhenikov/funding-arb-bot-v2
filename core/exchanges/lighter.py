@@ -82,12 +82,31 @@ class LighterExecutor(BaseExchangeExecutor):
             raise RuntimeError(f"Lighter ошибка открытия {symbol}: {err}")
 
         logger.info(f"Lighter: ордер исполнен {symbol}, tx={tx_hash}")
+
+        # Получаем реальный размер позиции после исполнения
+        actual_size = size_usd / price  # fallback
+        try:
+            positions = await self.get_positions()
+            if positions:
+                pos = next((p for p in positions if p["symbol"] == symbol.upper()), None)
+                if pos:
+                    actual_size = abs(pos["quantity"])
+                    logger.info(f"Lighter: подтверждённый размер {symbol} = {actual_size}")
+        except Exception as e:
+            logger.warning(f"Lighter: не удалось получить реальный размер: {e}")
+
         return {
             "tx_hash": str(tx_hash),
-            "size": size_usd / price,
+            "size": actual_size,
             "size_usd": size_usd,
             "price": price,
         }
+
+    async def market_open_by_qty(self, symbol: str, is_long: bool, quantity: float) -> dict:
+        """Открывает позицию по точному количеству (для синхронизации ног)."""
+        price = await self.get_mark_price(symbol)
+        size_usd = quantity * price
+        return await self.market_open(symbol, is_long, size_usd)
 
     async def market_close(self, symbol: str, size: float = 0, was_long: bool = True) -> dict:
         signer = self._get_signer()
@@ -99,10 +118,24 @@ class LighterExecutor(BaseExchangeExecutor):
 
         market_index = int(market.market_id)
         price = await self.get_mark_price(symbol)
-        size_usd = size * price if size > 0 else 0
+
+        # Если размер не указан — берём из реальной позиции
+        if size <= 0:
+            positions = await self.get_positions()
+            if positions:
+                pos = next((p for p in positions if p["symbol"] == symbol.upper()), None)
+                if pos:
+                    size = abs(pos["quantity"])
+            if size <= 0:
+                logger.info(f"Lighter: позиция {symbol} уже закрыта")
+                return {"tx_hash": "", "symbol": symbol, "price": price}
+
+        # +5% чтобы гарантированно закрыть всю позицию.
+        # reduce_only=True не даст закрыть больше, чем есть на бирже.
+        size_usd = size * price * 1.05
         client_order_id = int(time.time() * 1000) % 1_000_000
 
-        logger.info(f"Lighter: закрытие {symbol}, market_id={market_index}, ~${size_usd:.2f}")
+        logger.info(f"Lighter: закрытие {symbol}, market_id={market_index}, ~${size_usd:.2f} (с запасом 5%)")
 
         tx, tx_hash, err = await signer.create_market_order_quote_amount(
             market_index=market_index,
@@ -161,6 +194,10 @@ class LighterExecutor(BaseExchangeExecutor):
         except Exception as e:
             logger.warning(f"Lighter get_positions ошибка: {e}")
             return None
+
+    async def get_balance(self) -> float | None:
+        """Lighter не предоставляет API для чтения баланса."""
+        return None
 
     async def close(self):
         if self._signer:

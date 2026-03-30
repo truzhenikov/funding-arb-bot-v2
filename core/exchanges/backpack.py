@@ -31,7 +31,7 @@ class BackpackExecutor(BaseExchangeExecutor):
 
     def _sign(self, instruction: str, params: dict) -> dict:
         timestamp = int(time.time() * 1000)
-        window = 5000
+        window = 30000
 
         def _val(v):
             if isinstance(v, bool):
@@ -124,20 +124,55 @@ class BackpackExecutor(BaseExchangeExecutor):
             "price": executed_price,
         }
 
+    async def market_open_by_qty(self, symbol: str, is_long: bool, quantity: float) -> dict:
+        """Открывает позицию по точному количеству (для синхронизации ног)."""
+        await self._ensure_markets()
+        bp_symbol = self._bp_symbol(symbol)
+        price = await self.get_mark_price(symbol)
+        quantity = self._round_qty(symbol, quantity)
+
+        side = "Bid" if is_long else "Ask"
+        params = {
+            "orderType": "Market",
+            "quantity": str(quantity),
+            "side": side,
+            "symbol": bp_symbol,
+        }
+        headers = self._sign("orderExecute", params)
+
+        async with httpx.AsyncClient(timeout=10) as client:
+            resp = await client.post(
+                f"{self.BASE_URL}/api/v1/order",
+                json=params,
+                headers=headers,
+            )
+            result = resp.json()
+
+        if resp.status_code not in (200, 201):
+            raise RuntimeError(f"Backpack ошибка открытия: {result}")
+
+        executed_qty = float(result.get("executedQuantity") or quantity)
+        executed_price = float(result.get("avgPrice") or price)
+        logger.info(f"Backpack: открыт {'лонг' if is_long else 'шорт'} {symbol}, "
+                    f"qty={executed_qty}, price={executed_price}")
+        return {
+            "order_id": result.get("id"),
+            "size": executed_qty,
+            "size_usd": executed_qty * executed_price,
+            "price": executed_price,
+        }
+
     async def market_close(self, symbol: str, size: float = 0, was_long: bool = True) -> dict:
         bp_symbol = self._bp_symbol(symbol)
 
         if size > 0:
-            positions = await self.get_positions()
-            pos = next((p for p in (positions or []) if p.get("symbol") == symbol), None)
-            if not pos:
-                logger.info(f"Backpack: позиция {symbol} не найдена — считаем закрытой")
-                return {"symbol": symbol, "closed_qty": 0, "price": 0}
-            qty_full = pos.get("quantity", 0)
-            side = "Ask" if qty_full > 0 else "Bid"
+            # Размер известен — закрываем по нему
+            side = "Ask" if was_long else "Bid"
             qty = size
         else:
             raw_positions = await self._get_raw_positions()
+            if raw_positions is None:
+                raise RuntimeError(f"Backpack: не удалось получить позиции для закрытия {symbol}")
             pos = next((p for p in raw_positions if p.get("symbol") == bp_symbol), None)
             if not pos:
                 logger.info(f"Backpack: позиция {symbol} не найдена — считаем закрытой")

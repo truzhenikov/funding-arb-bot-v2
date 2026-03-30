@@ -95,14 +95,45 @@ async def open_pair(
                     f"Есть: ${balance:.2f}, нужно как минимум: ${size_usd * 0.1:.2f}"
                 )
 
-    # Открываем обе ноги параллельно
-    result_a, result_b = await asyncio.gather(
-        exec_a.market_open(symbol, is_long_a, size_usd),
-        exec_b.market_open(symbol, is_long_b, size_usd),
-        return_exceptions=True,
-    )
+    # Открываем ноги последовательно: первая по USD, вторая по количеству первой
+    try:
+        result_a = await exec_a.market_open(symbol, is_long_a, size_usd)
+    except Exception as e:
+        result_a = e
 
     a_ok = not isinstance(result_a, Exception)
+
+    if a_ok:
+        # Если size вернулся 0 (Aster не даёт fill сразу) — запросим позицию
+        actual_size = result_a["size"]
+        if actual_size <= 0:
+            await asyncio.sleep(1)
+            positions = await exec_a.get_positions()
+            if positions:
+                pos = next((p for p in positions if p["symbol"] == symbol.upper()), None)
+                if pos:
+                    actual_size = abs(pos["quantity"])
+                    result_a["size"] = actual_size
+            if actual_size <= 0:
+                actual_size = size_usd / result_a.get("price", 1)
+
+        # Вторую ногу открываем по количеству первой
+        try:
+            result_b = await exec_b.market_open_by_qty(symbol, is_long_b, actual_size)
+        except AttributeError:
+            # Если биржа не поддерживает open_by_qty — fallback на USD
+            try:
+                result_b = await exec_b.market_open(symbol, is_long_b, size_usd)
+            except Exception as e:
+                result_b = e
+        except Exception as e:
+            result_b = e
+    else:
+        try:
+            result_b = await exec_b.market_open(symbol, is_long_b, size_usd)
+        except Exception as e:
+            result_b = e
+
     b_ok = not isinstance(result_b, Exception)
 
     # Если одна нога упала — откатываем вторую
@@ -131,18 +162,33 @@ async def open_pair(
     tag_b = exchange_b_name[:2].upper()
     pair_id = f"{int(time.time())}_{symbol}_{tag_a}_{tag_b}"
 
-    await save_pair(pair_id, [
-        {
-            "symbol": symbol, "exchange": exchange_a_name, "direction": dir_a,
-            "size": result_a["size"], "entry_price": result_a["price"],
-            "position_size_usd": size_usd, "entry_apr": entry_apr,
-        },
-        {
-            "symbol": symbol, "exchange": exchange_b_name, "direction": dir_b,
-            "size": result_b["size"], "entry_price": result_b["price"],
-            "position_size_usd": size_usd, "entry_apr": entry_apr,
-        },
-    ])
+    try:
+        await save_pair(pair_id, [
+            {
+                "symbol": symbol, "exchange": exchange_a_name, "direction": dir_a,
+                "size": result_a["size"], "entry_price": result_a["price"],
+                "position_size_usd": size_usd, "entry_apr": entry_apr,
+            },
+            {
+                "symbol": symbol, "exchange": exchange_b_name, "direction": dir_b,
+                "size": result_b["size"], "entry_price": result_b["price"],
+                "position_size_usd": size_usd, "entry_apr": entry_apr,
+            },
+        ])
+    except Exception as db_err:
+        # Критично: позиции открыты, но БД не записала. Шлём алерт.
+        logger.critical(f"БД не сохранила пару {pair_id}: {db_err}")
+        try:
+            from bot.telegram import send_message
+            await send_message(
+                f"🚨 *КРИТИЧНО: пара открыта, но НЕ записана в БД!*\n\n"
+                f"*{symbol}*: {exchange_a_name} {dir_a} + {exchange_b_name} {dir_b}\n"
+                f"Размер: `${size_usd}`\n"
+                f"Ошибка БД: `{db_err}`\n\n"
+                f"⚠️ Запиши или закрой вручную!"
+            )
+        except Exception:
+            pass
 
     await _close_executor(exec_a)
     await _close_executor(exec_b)
@@ -170,21 +216,13 @@ async def close_pair(pair_id: str, symbol: str, legs: list[dict]) -> dict:
         tasks.append(executor.market_close(symbol, leg["size"], was_long))
 
     results = await asyncio.gather(*tasks, return_exceptions=True)
-    errors = [str(r) for r in results if isinstance(r, Exception)]
 
-    for executor in executors.values():
-        await _close_executor(executor)
-
-    if errors:
-        raise RuntimeError(
-            f"Не удалось закрыть ногу(и) пары {pair_id}:\n" + "\n".join(errors) +
-            "\n⚠️ Проверь позиции на биржах вручную!"
-        )
-
-    # Собираем P&L
+    # Собираем P&L для успешно закрытых ног
     leg_pnl: dict = {}
+    errors = []
     for leg, result in zip(legs, results):
         if isinstance(result, Exception):
+            errors.append(f"{leg['exchange']}: {result}")
             continue
         exit_price = result.get("price") or leg["entry_price"]
         was_long = (leg["direction"] == "LONG")
@@ -198,7 +236,27 @@ async def close_pair(pair_id: str, symbol: str, legs: list[dict]) -> dict:
             "fees_usd": round(fees, 6) if isinstance(fees, (int, float)) else 0.0,
         }
 
-    await db_close_pair(pair_id, leg_pnl if leg_pnl else None)
+    for executor in executors.values():
+        await _close_executor(executor)
+
+    # Записываем в БД всё, что удалось закрыть (с полными данными: exit_price, pnl, fees)
+    # Делаем ДО raise, чтобы данные не потерялись при частичном закрытии
+    if leg_pnl:
+        try:
+            await db_close_pair(pair_id, leg_pnl)
+        except Exception as db_err:
+            logger.error(f"Не удалось записать закрытие в БД: {db_err}")
+
+    if errors:
+        # Часть ног не закрылась — алерт
+        closed_names = [leg["exchange"] for leg, r in zip(legs, results) if not isinstance(r, Exception)]
+        raise RuntimeError(
+            f"Частичное закрытие пары {pair_id}!\n"
+            f"✅ Закрыты: {', '.join(closed_names) if closed_names else 'нет'}\n"
+            f"❌ Ошибки:\n" + "\n".join(errors) +
+            "\n\n⚠️ Проверь позиции на биржах вручную!"
+        )
+
     logger.info(f"Пара закрыта: {pair_id}")
     return {"pair_id": pair_id, "symbol": symbol}
 

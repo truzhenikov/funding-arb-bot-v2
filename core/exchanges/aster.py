@@ -2,6 +2,7 @@
 Aster DEX executor — API стиль Binance Futures (HMAC SHA256 аутентификация).
 SDK: pip install aster-connector-python
 """
+import asyncio
 import hashlib
 import hmac
 import logging
@@ -30,7 +31,7 @@ class AsterExecutor(BaseExchangeExecutor):
 
     def _sign(self, params: dict) -> str:
         """HMAC SHA256 подпись параметров запроса."""
-        query = "&".join(f"{k}={v}" for k, v in sorted(params.items()))
+        query = "&".join(f"{k}={v}" for k, v in params.items())
         return hmac.new(
             self._api_secret.encode(),
             query.encode(),
@@ -120,8 +121,20 @@ class AsterExecutor(BaseExchangeExecutor):
         if resp.status_code not in (200, 201):
             raise RuntimeError(f"Aster ошибка открытия: {result}")
 
-        executed_qty = float(result.get("executedQty") or quantity)
-        avg_price = float(result.get("avgPrice") or price)
+        executed_qty = float(result.get("executedQty") or 0)
+        avg_price = float(result.get("avgPrice") or 0)
+
+        # Aster может вернуть 0 — ордер ещё не исполнен, дозапрашиваем
+        if executed_qty <= 0 or avg_price <= 0:
+            order_id = result.get("orderId")
+            if order_id:
+                await asyncio.sleep(1)
+                executed_qty, avg_price = await self._query_order(aster_sym, order_id)
+            if executed_qty <= 0:
+                executed_qty = quantity
+            if avg_price <= 0:
+                avg_price = price
+
         logger.info(f"Aster: открыт {'лонг' if is_long else 'шорт'} {symbol}, "
                     f"qty={executed_qty}, price={avg_price}")
         return {
@@ -130,6 +143,81 @@ class AsterExecutor(BaseExchangeExecutor):
             "size_usd": size_usd,
             "price": avg_price,
         }
+
+    async def market_open_by_qty(self, symbol: str, is_long: bool, quantity: float) -> dict:
+        """Открывает позицию по точному количеству (для синхронизации ног)."""
+        await self._ensure_exchange_info()
+        aster_sym = self._aster_symbol(symbol)
+        price = await self.get_mark_price(symbol)
+        quantity = self._round_qty(aster_sym, quantity)
+
+        min_qty = self._exchange_info.get(aster_sym, {}).get("min_qty", 0.001)
+        if quantity < min_qty:
+            raise ValueError(f"Aster: размер {quantity} меньше минимума {min_qty} для {symbol}")
+
+        side = "BUY" if is_long else "SELL"
+        params = {
+            "symbol": aster_sym,
+            "side": side,
+            "type": "MARKET",
+            "quantity": str(quantity),
+            "timestamp": str(int(time.time() * 1000)),
+        }
+        params["signature"] = self._sign(params)
+
+        async with httpx.AsyncClient(timeout=10) as client:
+            resp = await client.post(
+                f"{BASE_URL}/fapi/v1/order",
+                params=params,
+                headers=self._headers(),
+            )
+            result = resp.json()
+
+        if resp.status_code not in (200, 201):
+            raise RuntimeError(f"Aster ошибка открытия: {result}")
+
+        executed_qty = float(result.get("executedQty") or 0)
+        avg_price = float(result.get("avgPrice") or 0)
+
+        if executed_qty <= 0 or avg_price <= 0:
+            order_id = result.get("orderId")
+            if order_id:
+                await asyncio.sleep(1)
+                executed_qty, avg_price = await self._query_order(aster_sym, order_id)
+            if executed_qty <= 0:
+                executed_qty = quantity
+            if avg_price <= 0:
+                avg_price = price
+
+        logger.info(f"Aster: открыт {'лонг' if is_long else 'шорт'} {symbol}, "
+                    f"qty={executed_qty}, price={avg_price}")
+        return {
+            "order_id": result.get("orderId"),
+            "size": executed_qty,
+            "size_usd": executed_qty * avg_price,
+            "price": avg_price,
+        }
+
+    async def _query_order(self, aster_sym: str, order_id) -> tuple[float, float]:
+        """Запрашивает статус ордера чтобы получить fill."""
+        try:
+            params = {
+                "symbol": aster_sym,
+                "orderId": str(order_id),
+                "timestamp": str(int(time.time() * 1000)),
+            }
+            params["signature"] = self._sign(params)
+            async with httpx.AsyncClient(timeout=10) as client:
+                resp = await client.get(
+                    f"{BASE_URL}/fapi/v1/order",
+                    params=params,
+                    headers=self._headers(),
+                )
+                data = resp.json()
+            return float(data.get("executedQty") or 0), float(data.get("avgPrice") or 0)
+        except Exception as e:
+            logger.warning(f"Aster _query_order ошибка: {e}")
+            return 0.0, 0.0
 
     async def market_close(self, symbol: str, size: float = 0, was_long: bool = True) -> dict:
         await self._ensure_exchange_info()
