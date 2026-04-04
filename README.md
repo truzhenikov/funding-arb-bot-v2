@@ -1,6 +1,6 @@
 # Funding Arbitrage Bot
 
-> 🇷🇺 [Русская версия](README_RU.md)
+> 🇷🇺 [Русская версия](README_RU.md) | 🐦 [X @Red_Devil_74](https://x.com/Red_Devil_74) | 💼 [LinkedIn](https://www.linkedin.com/in/pavelbelovinvest/)
 
 A Telegram bot for delta-neutral funding rate arbitrage on crypto perpetual exchanges.
 
@@ -352,9 +352,14 @@ The bot closes a pair automatically if:
 
 ---
 
-## Updates and questions
+## Updates and contacts
 
-Author's channel — bot updates, strategies, insights: [@hubcryptocis](https://t.me/hubcryptocis)
+Follow me for bot updates, strategies, and insights:
 
-Support (EVM): `0xA3aCe3905fb080930f7Eeac9Fe401F5B41b16629`
-Support (SOL): `5UztCBoUq2HvtH5nibLmWgxuR5fU5AeagkX9mqdXa5Pq`
+- 🐦 X (Twitter): [@Red_Devil_74](https://x.com/Red_Devil_74)
+- 💼 LinkedIn: [pavelbelovinvest](https://www.linkedin.com/in/pavelbelovinvest/)
+
+Support the project:
+
+- EVM: `0xA3aCe3905fb080930f7Eeac9Fe401F5B41b16629`
+- SOL: `5UztCBoUq2HvtH5nibLmWgxuR5fU5AeagkX9mqdXa5Pq`

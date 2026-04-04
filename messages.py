@@ -118,6 +118,7 @@ RU = {
     # ─── Support ─────────────────────────────────────────────────────────────
     "support_title": "💙 <b>Поддержать автора</b>",
     "support_channel": "Канал",
+    "author_links": None,  # RU uses AUTHOR_CHANNEL from config
 
     # ─── Monitoring alerts ───────────────────────────────────────────────────
     "negative_funding_alert": (
@@ -197,8 +198,9 @@ EN = {
         "👋 Hi! This is a delta-neutral funding arbitrage bot.\n\n"
         "The bot is free — I'm sharing it with the community. "
         "If you'd like to support and follow updates, "
-        "subscribe to the channel 👉 {channel_name}\n\n"
-        "{channel}"
+        "follow me 👉\n\n"
+        '🐦 <a href="https://x.com/Red_Devil_74">X @Red_Devil_74</a>\n'
+        '💼 <a href="https://www.linkedin.com/in/pavelbelovinvest/">LinkedIn</a>'
     ),
     "welcome_back": "👋 Hi! Control buttons below 👇",
     "welcome_subscribed": "✅ Thanks! Welcome 🤝",
@@ -283,6 +285,10 @@ EN = {
     # ─── Support ─────────────────────────────────────────────────────────────
     "support_title": "💙 <b>Support Author</b>",
     "support_channel": "Channel",
+    "author_links": (
+        '🐦 <a href="https://x.com/Red_Devil_74">X @Red_Devil_74</a>\n'
+        '💼 <a href="https://www.linkedin.com/in/pavelbelovinvest/">LinkedIn</a>'
+    ),
 
     # ─── Monitoring alerts ───────────────────────────────────────────────────
     "negative_funding_alert": (

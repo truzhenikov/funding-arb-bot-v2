@@ -971,9 +971,10 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif text == BTN_SETTINGS:
         await show_settings(update)
     elif text == BTN_SUPPORT:
+        author_links = MSG.get("author_links") or f'{MSG["support_channel"]}: <a href="{AUTHOR_CHANNEL}">{AUTHOR_CHANNEL_NAME}</a>'
         await update.message.reply_text(
             f"{MSG['support_title']}\n\n"
-            f'{MSG["support_channel"]}: <a href="{AUTHOR_CHANNEL}">{AUTHOR_CHANNEL_NAME}</a>\n\n'
+            f"{author_links}\n\n"
             f"EVM: <code>{DONATION_WALLET_EVM}</code>\n"
             f"SOL: <code>{DONATION_WALLET_SOL}</code>",
             parse_mode=ParseMode.HTML,
