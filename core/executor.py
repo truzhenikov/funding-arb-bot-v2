@@ -82,9 +82,15 @@ async def open_pair(
         f"{exchange_b_name} {'лонг' if is_long_b else 'шорт'}, ${size_usd}"
     )
 
-    # Проверяем баланс если биржа поддерживает
-    for name, executor in [(exchange_a_name, exec_a), (exchange_b_name, exec_b)]:
-        balance = await executor.get_balance()
+    # Проверяем балансы параллельно
+    bal_a, bal_b = await asyncio.gather(
+        exec_a.get_balance(),
+        exec_b.get_balance(),
+        return_exceptions=True,
+    )
+    for name, balance in [(exchange_a_name, bal_a), (exchange_b_name, bal_b)]:
+        if isinstance(balance, Exception):
+            continue
         if balance is not None:
             logger.info(f"{name} баланс: ${balance:.2f}")
             if balance < size_usd * 0.1:
@@ -95,45 +101,14 @@ async def open_pair(
                     f"Есть: ${balance:.2f}, нужно как минимум: ${size_usd * 0.1:.2f}"
                 )
 
-    # Открываем ноги последовательно: первая по USD, вторая по количеству первой
-    try:
-        result_a = await exec_a.market_open(symbol, is_long_a, size_usd)
-    except Exception as e:
-        result_a = e
+    # Открываем обе ноги одновременно — минимизируем ценовой лаг между ногами
+    result_a, result_b = await asyncio.gather(
+        exec_a.market_open(symbol, is_long_a, size_usd),
+        exec_b.market_open(symbol, is_long_b, size_usd),
+        return_exceptions=True,
+    )
 
     a_ok = not isinstance(result_a, Exception)
-
-    if a_ok:
-        # Если size вернулся 0 (Aster не даёт fill сразу) — запросим позицию
-        actual_size = result_a["size"]
-        if actual_size <= 0:
-            await asyncio.sleep(1)
-            positions = await exec_a.get_positions()
-            if positions:
-                pos = next((p for p in positions if p["symbol"] == symbol.upper()), None)
-                if pos:
-                    actual_size = abs(pos["quantity"])
-                    result_a["size"] = actual_size
-            if actual_size <= 0:
-                actual_size = size_usd / result_a.get("price", 1)
-
-        # Вторую ногу открываем по количеству первой
-        try:
-            result_b = await exec_b.market_open_by_qty(symbol, is_long_b, actual_size)
-        except AttributeError:
-            # Если биржа не поддерживает open_by_qty — fallback на USD
-            try:
-                result_b = await exec_b.market_open(symbol, is_long_b, size_usd)
-            except Exception as e:
-                result_b = e
-        except Exception as e:
-            result_b = e
-    else:
-        try:
-            result_b = await exec_b.market_open(symbol, is_long_b, size_usd)
-        except Exception as e:
-            result_b = e
-
     b_ok = not isinstance(result_b, Exception)
 
     # Если одна нога упала — откатываем вторую
