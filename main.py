@@ -65,7 +65,7 @@ _exchange_sizes: dict[str, float] = {}  # {"Backpack": 100, "Lighter": 200, ...}
 
 # Настройки защиты (можно менять в боте)
 _protection_enabled: bool = True
-_price_close_pct: float = PRICE_AUTO_CLOSE_PCT   # % падения цены → закрыть
+_neg_apr_hard_close: float = NEG_APR_HARD_CLOSE   # APR ниже этого → мгновенное закрытие
 _neg_apr_hours: float = NEG_APR_WAIT_HOURS        # часов в минусе → закрыть
 
 # История Net APR пар — сколько часов держится положительный результат
@@ -86,7 +86,7 @@ _trade_lock = asyncio.Lock()         # open/close/scale_in
 # Ожидаем ввод
 _waiting_for_size: str | None = None       # None или "global" / exchange_name
 _waiting_for_scale_in: tuple | None = None
-_waiting_for_price_pct: bool = False       # ожидаем ввод % падения цены вручную
+_waiting_for_apr_hard: bool = False        # ожидаем ввод порога APR вручную
 _waiting_for_neg_hours: bool = False       # ожидаем ввод часов вручную
 
 # ─── Кнопки ──────────────────────────────────────────────────────────────────
@@ -130,7 +130,7 @@ def get_position_size(exchange_name: str) -> float:
 async def _load_settings():
     """Загружает настройки из БД при старте."""
     global _position_size_mode, _global_position_size, _exchange_sizes, _enabled_exchanges
-    global _protection_enabled, _price_close_pct, _neg_apr_hours
+    global _protection_enabled, _neg_apr_hard_close, _neg_apr_hours
 
     mode = await load_setting("position_size_mode", "global")
     _position_size_mode = mode
@@ -151,7 +151,7 @@ async def _load_settings():
         _enabled_exchanges = set(EXCHANGES.values())
 
     _protection_enabled = (await load_setting("protection_enabled", "1")) == "1"
-    _price_close_pct = float(await load_setting("price_close_pct", str(PRICE_AUTO_CLOSE_PCT)))
+    _neg_apr_hard_close = float(await load_setting("neg_apr_hard_close", str(NEG_APR_HARD_CLOSE)))
     _neg_apr_hours = float(await load_setting("neg_apr_hours", str(NEG_APR_WAIT_HOURS)))
 
 
@@ -162,7 +162,7 @@ async def _save_settings():
     await save_setting("exchange_sizes", json.dumps(_exchange_sizes))
     await save_setting("enabled_exchanges", ",".join(_enabled_exchanges))
     await save_setting("protection_enabled", "1" if _protection_enabled else "0")
-    await save_setting("price_close_pct", str(_price_close_pct))
+    await save_setting("neg_apr_hard_close", str(_neg_apr_hard_close))
     await save_setting("neg_apr_hours", str(_neg_apr_hours))
 
 
@@ -343,13 +343,13 @@ async def _monitor_open_pairs(exchange_rates: dict):
         if not _protection_enabled:
             continue
 
-        if net_apr < NEG_APR_HARD_CLOSE:
+        if net_apr < _neg_apr_hard_close:
             logger.warning(f"Автозакрытие {symbol}: нетто APR={net_apr:.1f}%")
             _negative_funding_since.pop(pair_id, None)
             apr_details = " | ".join(_leg_apr_str(l) for l in legs)
             await _auto_close_pair(
                 pair_id, symbol, legs,
-                reason=MSG["auto_close_reason_neg_apr"].format(apr=net_apr, threshold=NEG_APR_HARD_CLOSE, details=apr_details),
+                reason=MSG["auto_close_reason_neg_apr"].format(apr=net_apr, threshold=_neg_apr_hard_close, details=apr_details),
             )
             continue
 
@@ -436,7 +436,7 @@ async def _monitor_open_pairs(exchange_rates: dict):
 
                         direction_str = MSG["price_went_down"] if leg["direction"] == "LONG" else MSG["price_went_up"]
 
-                        if loss_pct >= _price_close_pct:
+                        if loss_pct >= PRICE_AUTO_CLOSE_PCT:
                             await _auto_close_pair(
                                 pair_id, symbol, legs,
                                 reason=MSG["auto_close_reason_price"].format(
@@ -457,7 +457,7 @@ async def _monitor_open_pairs(exchange_rates: dict):
                                     MSG["price_risk_alert"].format(
                                         symbol=symbol, exchange=exch_name, direction=leg["direction"],
                                         direction_str=direction_str, loss=loss_pct,
-                                        entry=entry, current=cur_price, threshold=_price_close_pct,
+                                        entry=entry, current=cur_price, threshold=PRICE_AUTO_CLOSE_PCT,
                                     ),
                                     reply_markup=keyboard,
                                 )
@@ -730,14 +730,14 @@ def _build_settings() -> tuple:
 
     if _protection_enabled:
         rows.append([InlineKeyboardButton(
-            f"📉 Закрыть при падении цены: {_price_close_pct:.0f}%", callback_data="noop"
+            f"📉 Закрыть при APR ниже: {_neg_apr_hard_close:.0f}%", callback_data="noop"
         )])
-        _pct_presets = [15, 25, 35, 50, 100]
+        _apr_presets = [-20, -30, -50, -100, -200]
         rows.append([
-            InlineKeyboardButton(f"{'▶ ' if _price_close_pct == v else ''}{v}%", callback_data=f"set_price_pct:{v}")
-            for v in _pct_presets
+            InlineKeyboardButton(f"{'▶ ' if _neg_apr_hard_close == v else ''}{v}%", callback_data=f"set_apr_hard:{v}")
+            for v in _apr_presets
         ])
-        rows.append([InlineKeyboardButton("✏️ Указать вручную", callback_data="set_price_pct:manual")])
+        rows.append([InlineKeyboardButton("✏️ Указать вручную", callback_data="set_apr_hard:manual")])
 
         rows.append([InlineKeyboardButton(
             f"📊 Закрыть при минус-фандинге: {_neg_apr_hours:.0f}ч", callback_data="noop"
@@ -751,7 +751,7 @@ def _build_settings() -> tuple:
 
     prot_desc = ""
     if _protection_enabled:
-        prot_desc = f"\n\n🛡 Защита: закрытие при падении &gt;{_price_close_pct:.0f}% или минус-фандинге &gt;{_neg_apr_hours:.0f}ч"
+        prot_desc = f"\n\n🛡 Защита: закрытие при APR &lt;{_neg_apr_hard_close:.0f}% или минус-фандинге &gt;{_neg_apr_hours:.0f}ч"
     else:
         prot_desc = "\n\n⚠️ Защита выключена — автозакрытие не работает"
 
@@ -1080,15 +1080,15 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await _save_settings()
         await _refresh_settings(query)
 
-    elif data.startswith("set_price_pct:"):
-        global _price_close_pct, _waiting_for_price_pct
+    elif data.startswith("set_apr_hard:"):
+        global _neg_apr_hard_close, _waiting_for_apr_hard
         val = data.split(":")[1]
         if val == "manual":
-            _waiting_for_price_pct = True
+            _waiting_for_apr_hard = True
             await query.message.delete()
-            await query.message.chat.send_message("Введи % падения цены для автозакрытия (например: 40)")
+            await query.message.chat.send_message("Введи порог APR для мгновенного закрытия (например: -75). Должно быть отрицательным числом.")
         else:
-            _price_close_pct = float(val)
+            _neg_apr_hard_close = float(val)
             await _save_settings()
             await _refresh_settings(query)
 
@@ -1113,7 +1113,7 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обработка текстовых сообщений."""
-    global _waiting_for_size, _waiting_for_scale_in, _waiting_for_price_pct, _waiting_for_neg_hours
+    global _waiting_for_size, _waiting_for_scale_in, _waiting_for_apr_hard, _waiting_for_neg_hours
 
     text = update.message.text.strip()
 
@@ -1159,18 +1159,20 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
         except ValueError:
             await update.message.reply_text(MSG["enter_number_error"], parse_mode=ParseMode.HTML)
-    # Ввод % падения цены вручную
-    elif _waiting_for_price_pct:
-        _waiting_for_price_pct = False
+    # Ввод порога APR вручную
+    elif _waiting_for_apr_hard:
+        _waiting_for_apr_hard = False
         try:
             val = float(text.replace("%", "").replace(",", "."))
-            if val <= 0 or val > 100:
-                await update.message.reply_text("Введи число от 1 до 100")
+            if val > 0:
+                val = -val  # пользователь мог ввести положительное число
+            if val < -500 or val >= 0:
+                await update.message.reply_text("Введи отрицательное число, например: -75")
                 return
-            global _price_close_pct
-            _price_close_pct = val
+            global _neg_apr_hard_close
+            _neg_apr_hard_close = val
             await _save_settings()
-            await update.message.reply_text(f"✅ Закрытие при падении цены: <code>{val:.0f}%</code>", parse_mode=ParseMode.HTML)
+            await update.message.reply_text(f"✅ Закрытие при APR ниже: <code>{val:.0f}%</code>", parse_mode=ParseMode.HTML)
         except ValueError:
             await update.message.reply_text(MSG["enter_number_error"], parse_mode=ParseMode.HTML)
 
