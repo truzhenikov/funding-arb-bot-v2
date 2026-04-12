@@ -49,10 +49,22 @@ async def send_pair_signal(opp: dict, size_usd: float = 0) -> None:
     fee_b = EXCHANGE_FEES.get(exch_b, "?")
     net_apr = opp['net_apr']
 
+    # Стрик фандинга (сколько часов держится выгодный APR)
+    streak_a = opp.get("streak_a")
+    streak_b = opp.get("streak_b")
+
+    def _streak_str(hours: float | None) -> str:
+        if hours is None or hours < 1:
+            return ""
+        if hours < 24:
+            return f" ⏱ {hours:.0f}ч"
+        days = hours / 24
+        return f" ⏱ {days:.1f}д"
+
     text = (
         f"🔀 <b>{esc(symbol)}</b> — {esc(exch_a)} × {esc(exch_b)}\n\n"
-        f"{esc(exch_a)} ({dir_a_str}): <code>{eff_a:+.1f}%</code>\n"
-        f"{esc(exch_b)} ({dir_b_str}): <code>{eff_b:+.1f}%</code>\n"
+        f"{esc(exch_a)} ({dir_a_str}): <code>{eff_a:+.1f}%</code>{_streak_str(streak_a)}\n"
+        f"{esc(exch_b)} ({dir_b_str}): <code>{eff_b:+.1f}%</code>{_streak_str(streak_b)}\n"
         f"{MSG['signal_net_apr']}: ~{net_apr:.1f}% APR\n\n"
         f"💸 {esc(exch_a)}: {fee_a} {MSG['signal_fee']} | {esc(exch_b)}: {fee_b}"
     )
