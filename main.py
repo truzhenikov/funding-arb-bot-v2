@@ -270,7 +270,6 @@ async def _verify_positions(exchange_rates: dict):
             try:
                 executor = get_executor(exch)
                 positions = await executor.get_positions()
-                await executor.close()
                 if positions is not None:
                     real_positions[exch] = {p["symbol"]: p["quantity"] for p in positions}
                 else:
@@ -463,7 +462,6 @@ async def _monitor_open_pairs(exchange_rates: dict):
                                     reply_markup=keyboard,
                                 )
 
-                await executor.close()
             except Exception as e:
                 logger.debug(f"Мониторинг {exch_name} {symbol}: {e}")
 
@@ -498,8 +496,9 @@ async def _scan_opportunities(exchange_rates: dict):
     """Ищет пары и отправляет сигналы."""
     opps = find_pair_opportunities(exchange_rates, _enabled_exchanges)
 
-    # Обновляем стрики для всех найденных пар (и помечаем отсутствующие как дип)
-    _update_pair_net_streaks(opps)
+    # Стрики считаем по ВСЕМ парам с положительным Net APR (без порога сигнала)
+    all_positive = find_pair_opportunities(exchange_rates, _enabled_exchanges, min_pair_apr=0)
+    _update_pair_net_streaks(all_positive)
 
     if not opps:
         return
@@ -894,7 +893,8 @@ async def scan_manual(update: Update):
 
     await msg.delete()
 
-    _update_pair_net_streaks(opps)
+    all_positive = find_pair_opportunities(exchange_rates, _enabled_exchanges, min_pair_apr=0)
+    _update_pair_net_streaks(all_positive)
     for opp in opps:
         _enrich_opp_with_streaks(opp)
         await send_pair_signal(opp)
@@ -1074,6 +1074,9 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data == "toggle_protection":
         global _protection_enabled
         _protection_enabled = not _protection_enabled
+        if not _protection_enabled:
+            # Сбрасываем таймеры — иначе при повторном включении пары закроются мгновенно
+            _negative_funding_since.clear()
         await _save_settings()
         await _refresh_settings(query)
 

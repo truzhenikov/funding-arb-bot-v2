@@ -202,3 +202,4 @@ class LighterExecutor(BaseExchangeExecutor):
     async def close(self):
         if self._signer:
             await self._signer.close()
+            self._signer = None
