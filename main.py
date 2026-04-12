@@ -79,8 +79,10 @@ _scan_lock = asyncio.Lock()          # сканирование (авто + ру
 _trade_lock = asyncio.Lock()         # open/close/scale_in
 
 # Ожидаем ввод
-_waiting_for_size: str | None = None  # None или "global" / exchange_name
+_waiting_for_size: str | None = None       # None или "global" / exchange_name
 _waiting_for_scale_in: tuple | None = None
+_waiting_for_price_pct: bool = False       # ожидаем ввод % падения цены вручную
+_waiting_for_neg_hours: bool = False       # ожидаем ввод часов вручную
 
 # ─── Кнопки ──────────────────────────────────────────────────────────────────
 BTN_POSITIONS = MSG["btn_positions"]
@@ -660,24 +662,22 @@ def _build_settings() -> tuple:
         rows.append([InlineKeyboardButton(
             f"📉 Закрыть при падении цены: {_price_close_pct:.0f}%", callback_data="noop"
         )])
+        _pct_presets = [15, 25, 35, 50, 100]
         rows.append([
-            InlineKeyboardButton(f"{'▶ ' if _price_close_pct == 10 else ''}10%", callback_data="set_price_pct:10"),
-            InlineKeyboardButton(f"{'▶ ' if _price_close_pct == 15 else ''}15%", callback_data="set_price_pct:15"),
-            InlineKeyboardButton(f"{'▶ ' if _price_close_pct == 20 else ''}20%", callback_data="set_price_pct:20"),
-            InlineKeyboardButton(f"{'▶ ' if _price_close_pct == 25 else ''}25%", callback_data="set_price_pct:25"),
-            InlineKeyboardButton(f"{'▶ ' if _price_close_pct == 30 else ''}30%", callback_data="set_price_pct:30"),
+            InlineKeyboardButton(f"{'▶ ' if _price_close_pct == v else ''}{v}%", callback_data=f"set_price_pct:{v}")
+            for v in _pct_presets
         ])
+        rows.append([InlineKeyboardButton("✏️ Указать вручную", callback_data="set_price_pct:manual")])
+
         rows.append([InlineKeyboardButton(
             f"📊 Закрыть при минус-фандинге: {_neg_apr_hours:.0f}ч", callback_data="noop"
         )])
+        _hours_presets = [1, 2, 4, 6, 12, 24]
         rows.append([
-            InlineKeyboardButton(f"{'▶ ' if _neg_apr_hours == 1 else ''}1ч", callback_data="set_neg_hours:1"),
-            InlineKeyboardButton(f"{'▶ ' if _neg_apr_hours == 2 else ''}2ч", callback_data="set_neg_hours:2"),
-            InlineKeyboardButton(f"{'▶ ' if _neg_apr_hours == 4 else ''}4ч", callback_data="set_neg_hours:4"),
-            InlineKeyboardButton(f"{'▶ ' if _neg_apr_hours == 6 else ''}6ч", callback_data="set_neg_hours:6"),
-            InlineKeyboardButton(f"{'▶ ' if _neg_apr_hours == 12 else ''}12ч", callback_data="set_neg_hours:12"),
-            InlineKeyboardButton(f"{'▶ ' if _neg_apr_hours == 24 else ''}24ч", callback_data="set_neg_hours:24"),
+            InlineKeyboardButton(f"{'▶ ' if _neg_apr_hours == v else ''}{v}ч", callback_data=f"set_neg_hours:{v}")
+            for v in _hours_presets
         ])
+        rows.append([InlineKeyboardButton("✏️ Указать вручную", callback_data="set_neg_hours:manual")])
 
     prot_desc = ""
     if _protection_enabled:
@@ -1005,16 +1005,28 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await _refresh_settings(query)
 
     elif data.startswith("set_price_pct:"):
-        global _price_close_pct
-        _price_close_pct = float(data.split(":")[1])
-        await _save_settings()
-        await _refresh_settings(query)
+        global _price_close_pct, _waiting_for_price_pct
+        val = data.split(":")[1]
+        if val == "manual":
+            _waiting_for_price_pct = True
+            await query.message.delete()
+            await query.message.chat.send_message("Введи % падения цены для автозакрытия (например: 40)")
+        else:
+            _price_close_pct = float(val)
+            await _save_settings()
+            await _refresh_settings(query)
 
     elif data.startswith("set_neg_hours:"):
-        global _neg_apr_hours
-        _neg_apr_hours = float(data.split(":")[1])
-        await _save_settings()
-        await _refresh_settings(query)
+        global _neg_apr_hours, _waiting_for_neg_hours
+        val = data.split(":")[1]
+        if val == "manual":
+            _waiting_for_neg_hours = True
+            await query.message.delete()
+            await query.message.chat.send_message("Введи количество часов в минус-фандинге для автозакрытия (например: 8)")
+        else:
+            _neg_apr_hours = float(val)
+            await _save_settings()
+            await _refresh_settings(query)
 
     # ── Пагинация истории ────────────────────────────────────────────────────
     elif data.startswith("history_page:"):
@@ -1025,7 +1037,7 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обработка текстовых сообщений."""
-    global _waiting_for_size, _waiting_for_scale_in
+    global _waiting_for_size, _waiting_for_scale_in, _waiting_for_price_pct, _waiting_for_neg_hours
 
     text = update.message.text.strip()
 
@@ -1071,6 +1083,36 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
         except ValueError:
             await update.message.reply_text(MSG["enter_number_error"], parse_mode=ParseMode.HTML)
+    # Ввод % падения цены вручную
+    elif _waiting_for_price_pct:
+        _waiting_for_price_pct = False
+        try:
+            val = float(text.replace("%", "").replace(",", "."))
+            if val <= 0 or val > 100:
+                await update.message.reply_text("Введи число от 1 до 100")
+                return
+            global _price_close_pct
+            _price_close_pct = val
+            await _save_settings()
+            await update.message.reply_text(f"✅ Закрытие при падении цены: <code>{val:.0f}%</code>", parse_mode=ParseMode.HTML)
+        except ValueError:
+            await update.message.reply_text(MSG["enter_number_error"], parse_mode=ParseMode.HTML)
+
+    # Ввод часов минус-фандинга вручную
+    elif _waiting_for_neg_hours:
+        _waiting_for_neg_hours = False
+        try:
+            val = float(text.replace("ч", "").replace(",", "."))
+            if val <= 0 or val > 168:
+                await update.message.reply_text("Введи число от 1 до 168 (часов)")
+                return
+            global _neg_apr_hours
+            _neg_apr_hours = val
+            await _save_settings()
+            await update.message.reply_text(f"✅ Закрытие при минус-фандинге: <code>{val:.0f}ч</code>", parse_mode=ParseMode.HTML)
+        except ValueError:
+            await update.message.reply_text(MSG["enter_number_error"], parse_mode=ParseMode.HTML)
+
     # Ввод суммы для scale_in
     elif _waiting_for_scale_in is not None:
         pair_id, symbol = _waiting_for_scale_in
