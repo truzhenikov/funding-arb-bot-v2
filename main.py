@@ -55,6 +55,9 @@ VERIFY_ALERT_COOLDOWN_SECONDS = 300
 _liq_alerts_sent: dict[str, float] = {}
 LIQ_ALERT_COOLDOWN_SECONDS = 1800
 
+_orphan_alerts_sent: dict[str, float] = {}
+ORPHAN_ALERT_COOLDOWN_SECONDS = 1800  # повторный алерт не чаще раза в 30 мин
+
 _negative_funding_since: dict[str, float] = {}
 
 # ─── Настройки (загружаются из БД при старте) ─────────────────────────────────
@@ -297,6 +300,15 @@ async def _verify_positions(exchange_rates: dict):
             elif (real_qty > 0) != expected_long:
                 real_dir = "LONG" if real_qty > 0 else "SHORT"
                 alerts.append(MSG["mismatch_direction"].format(symbol=symbol, exchange=exch, db_dir=leg["direction"], real_dir=real_dir))
+            else:
+                # Проверяем расхождение по размеру (> 40% разницы — аномалия)
+                expected_size = abs(leg.get("size", 0))
+                real_size = abs(real_qty)
+                if expected_size > 0 and real_size < expected_size * 0.6:
+                    alerts.append(
+                        f"{symbol} на {exch}: размер в БД {expected_size:.4f}, "
+                        f"на бирже {real_size:.4f} ({real_size / expected_size * 100:.0f}%) — частичное закрытие?"
+                    )
 
     if not alerts:
         return
@@ -310,6 +322,49 @@ async def _verify_positions(exchange_rates: dict):
     await send_message(
         MSG["position_mismatch"].format(alerts="\n".join(f"⚠️ {a}" for a in alerts))
     )
+
+
+# ─── Осиротевшие ноги пар ────────────────────────────────────────────────────
+
+async def _handle_orphan_leg(pair_id: str, symbol: str, leg: dict):
+    """
+    Одна нога пары осталась открытой после частичного закрытия.
+    Шлём алерт и закрываем автоматически.
+    """
+    alert_key = f"orphan:{pair_id}:{leg['exchange']}"
+    now = time.time()
+    if now - _orphan_alerts_sent.get(alert_key, 0) < ORPHAN_ALERT_COOLDOWN_SECONDS:
+        return
+    _orphan_alerts_sent[alert_key] = now
+
+    exch = leg["exchange"]
+    direction = leg["direction"]
+    size_usd = leg.get("position_size_usd", 0)
+
+    keyboard = InlineKeyboardMarkup([[
+        InlineKeyboardButton("❌ Закрыть вручную", callback_data=f"close:{leg['id']}:{symbol}")
+    ]])
+    await send_message(
+        f"⚠️ <b>Осиротевшая нога пары!</b>\n\n"
+        f"<b>{symbol}</b> — {exch} ({direction}), ${size_usd:.0f}\n"
+        f"Одна нога уже закрыта, эта осталась незахеджированной.\n"
+        f"🤖 Закрываю автоматически...",
+        reply_markup=keyboard,
+    )
+
+    try:
+        async with _trade_lock:
+            executor = get_executor(exch)
+            was_long = (direction == "LONG")
+            await executor.market_close(symbol, leg["size"], was_long)
+            await mark_position_closed(leg["id"])
+        await send_message(f"✅ <b>{symbol}</b> ({exch}) — осиротевшая нога закрыта автоматически.")
+    except Exception as e:
+        logger.error(f"Не удалось закрыть осиротевшую ногу {pair_id} {exch}: {e}")
+        await send_message(
+            f"❌ <b>{symbol}</b> ({exch}) — не удалось закрыть автоматически: {e}\n"
+            f"⚠️ Закрой вручную немедленно!"
+        )
 
 
 # ─── Мониторинг открытых пар ─────────────────────────────────────────────────
@@ -328,11 +383,14 @@ async def _monitor_open_pairs(exchange_rates: dict):
 
     for pair in pairs:
         legs = pair["legs"]
-        if len(legs) < 2:
-            continue
-
         pair_id = pair["pair_id"]
         symbol = legs[0]["symbol"]
+
+        # Осиротевшая нога пары — одна уже закрыта, эта осталась
+        if len(legs) < 2:
+            if pair_id:  # только если это была пара, не одиночная позиция
+                await _handle_orphan_leg(pair_id, symbol, legs[0])
+            continue
 
         # Считаем нетто APR
         net_apr = calc_net_apr_for_pair(legs, rates_map)

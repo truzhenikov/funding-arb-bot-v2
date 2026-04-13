@@ -224,16 +224,16 @@ class AsterExecutor(BaseExchangeExecutor):
         aster_sym = self._aster_symbol(symbol)
         price = await self.get_mark_price(symbol)
 
-        # Если size не указан — получаем из позиций
+        # Всегда проверяем реальную позицию на бирже перед закрытием
+        positions = await self.get_positions()
+        pos = next((p for p in positions if p["symbol"] == symbol.upper()), None) if positions else None
+        real_size = abs(pos["quantity"]) if pos else 0
+        if real_size == 0:
+            logger.info(f"Aster: позиция {symbol} уже закрыта на бирже")
+            return {"symbol": symbol, "price": price, "fee": 0}
+
         if size <= 0:
-            positions = await self.get_positions()
-            if positions:
-                pos = next((p for p in positions if p["symbol"] == symbol.upper()), None)
-                if pos:
-                    size = abs(pos["quantity"])
-            if size <= 0:
-                logger.info(f"Aster: позиция {symbol} уже закрыта")
-                return {"symbol": symbol, "price": price, "fee": 0}
+            size = real_size
 
         quantity = self._round_qty(aster_sym, size)
         side = "SELL" if was_long else "BUY"
