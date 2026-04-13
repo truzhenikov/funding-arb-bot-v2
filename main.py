@@ -1016,7 +1016,33 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await close_pair(pair_id, symbol, legs)
             await query.edit_message_text(MSG["pair_closed"].format(symbol=symbol), parse_mode=ParseMode.HTML)
         except Exception as e:
-            await query.edit_message_text(MSG["close_error"].format(error=e), parse_mode=ParseMode.HTML)
+            err_kb = InlineKeyboardMarkup([[
+                InlineKeyboardButton("🔧 Закрыть в БД (позиции уже нет)", callback_data=f"force_close_db:{pair_id}:{symbol}")
+            ]])
+            await query.edit_message_text(
+                MSG["close_error"].format(error=e),
+                parse_mode=ParseMode.HTML,
+                reply_markup=err_kb,
+            )
+
+    # ── Принудительное закрытие в БД (позиция уже закрыта на бирже вручную) ──
+    elif data.startswith("force_close_db:"):
+        parts = data.split(":")
+        pair_id = parts[1]
+        symbol = parts[2] if len(parts) > 2 else "?"
+
+        await query.edit_message_text(f"⏳ Закрываем <b>{symbol}</b> в БД...", parse_mode=ParseMode.HTML)
+        try:
+            legs = await get_positions_by_pair(pair_id)
+            open_legs = [l for l in legs if l.get("status") != "closed"]
+            for leg in open_legs:
+                await mark_position_closed(leg["id"])
+            await query.edit_message_text(
+                f"✅ <b>{symbol}</b> закрыт в БД ({len(open_legs)} ног).\nПозиции на биржах — проверь вручную.",
+                parse_mode=ParseMode.HTML,
+            )
+        except Exception as e:
+            await query.edit_message_text(f"❌ Ошибка: {e}", parse_mode=ParseMode.HTML)
 
     # ── Закрытие одиночной позиции ────────────────────────────────────────
     elif data.startswith("close:"):
