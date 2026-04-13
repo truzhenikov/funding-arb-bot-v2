@@ -94,6 +94,17 @@ class GRVTExecutor(BaseExchangeExecutor):
         )
 
         if not order:
+            logger.warning(f"GRVT: пустой ответ при открытии {symbol}, retry через 2с...")
+            import asyncio as _asyncio
+            await _asyncio.sleep(2)
+            order = await api.create_order(
+                symbol=instrument,
+                order_type="market",
+                side=side,
+                amount=Decimal(str(size)),
+            )
+
+        if not order:
             raise RuntimeError(f"GRVT: ордер {symbol} отклонён биржей (пустой ответ от API)")
 
         # Парсим результат
@@ -127,6 +138,17 @@ class GRVTExecutor(BaseExchangeExecutor):
             side=side,
             amount=Decimal(str(quantity)),
         )
+
+        if not order:
+            logger.warning(f"GRVT: пустой ответ при открытии {symbol} qty, retry через 2с...")
+            import asyncio as _asyncio
+            await _asyncio.sleep(2)
+            order = await api.create_order(
+                symbol=instrument,
+                order_type="market",
+                side=side,
+                amount=Decimal(str(quantity)),
+            )
 
         if not order:
             raise RuntimeError(f"GRVT: ордер {symbol} отклонён биржей (пустой ответ от API)")
@@ -167,8 +189,19 @@ class GRVTExecutor(BaseExchangeExecutor):
             order_type="market",
             side=side,
             amount=Decimal(str(close_size)),
-            params={"reduce_only": True},
         )
+
+        # GRVT SDK иногда возвращает None при первой попытке — делаем один retry
+        if not order:
+            logger.warning(f"GRVT: пустой ответ при закрытии {symbol}, retry через 2с...")
+            import asyncio as _asyncio
+            await _asyncio.sleep(2)
+            order = await api.create_order(
+                symbol=instrument,
+                order_type="market",
+                side=side,
+                amount=Decimal(str(close_size)),
+            )
 
         if not order:
             raise RuntimeError(f"GRVT: закрытие {symbol} отклонено биржей (пустой ответ от API)")
