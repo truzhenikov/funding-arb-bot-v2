@@ -94,22 +94,19 @@ class GRVTExecutor(BaseExchangeExecutor):
         )
 
         if not order:
-            logger.warning(f"GRVT: пустой ответ при открытии {symbol}, retry через 2с...")
+            # Пустой ответ — НЕ делаем retry (опасно: можно открыть двойную позицию).
+            # Проверяем реальное состояние позиции на бирже.
             import asyncio as _asyncio
             await _asyncio.sleep(2)
-            order = await api.create_order(
-                symbol=instrument,
-                order_type="market",
-                side=side,
-                amount=Decimal(str(size)),
-            )
-
-        if not order:
-            raise RuntimeError(f"GRVT: ордер {symbol} отклонён биржей (пустой ответ от API)")
+            real_size = await self._get_position_size(symbol)
+            if real_size is not None and abs(real_size) > 0:
+                logger.warning(f"GRVT: ордер {symbol} исполнен, но ответ был пустым (обнаружено через positions)")
+            else:
+                raise RuntimeError(f"GRVT: ордер {symbol} отклонён биржей (пустой ответ от API)")
 
         # Парсим результат
-        filled_size = float(order.get("filled") or order.get("amount") or size)
-        filled_price = float(order.get("average") or order.get("price") or price)
+        filled_size = float(order.get("filled") or order.get("amount") or size) if order else size
+        filled_price = float(order.get("average") or order.get("price") or price) if order else price
 
         logger.info(f"GRVT: ордер исполнен {symbol}, size={filled_size}, price={filled_price}")
         return {
@@ -140,21 +137,16 @@ class GRVTExecutor(BaseExchangeExecutor):
         )
 
         if not order:
-            logger.warning(f"GRVT: пустой ответ при открытии {symbol} qty, retry через 2с...")
             import asyncio as _asyncio
             await _asyncio.sleep(2)
-            order = await api.create_order(
-                symbol=instrument,
-                order_type="market",
-                side=side,
-                amount=Decimal(str(quantity)),
-            )
+            real_size = await self._get_position_size(symbol)
+            if real_size is not None and abs(real_size) > 0:
+                logger.warning(f"GRVT: ордер {symbol} qty исполнен, но ответ был пустым")
+            else:
+                raise RuntimeError(f"GRVT: ордер {symbol} отклонён биржей (пустой ответ от API)")
 
-        if not order:
-            raise RuntimeError(f"GRVT: ордер {symbol} отклонён биржей (пустой ответ от API)")
-
-        filled_size = float(order.get("filled") or order.get("amount") or quantity)
-        filled_price = float(order.get("average") or order.get("price") or price)
+        filled_size = float(order.get("filled") or order.get("amount") or quantity) if order else quantity
+        filled_price = float(order.get("average") or order.get("price") or price) if order else price
 
         logger.info(f"GRVT: ордер исполнен {symbol}, size={filled_size}, price={filled_price}")
         return {
