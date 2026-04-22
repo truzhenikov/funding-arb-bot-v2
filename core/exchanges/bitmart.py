@@ -56,10 +56,11 @@ class BitMartExecutor(BaseExchangeExecutor):
         return data
 
     async def _signed_post(self, path: str, body: dict) -> dict:
+        body_str = json.dumps(body or {}, separators=(",", ":"))
         async with httpx.AsyncClient(timeout=15) as client:
             resp = await client.post(
                 f"{self.BASE_URL}{path}",
-                json=body,
+                content=body_str.encode("utf-8"),
                 headers=self._headers(body),
             )
         data = resp.json()
