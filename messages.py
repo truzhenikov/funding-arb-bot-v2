@@ -75,7 +75,7 @@ RU = {
     "settings_farm_header": "── Режим фарма ──",
     "settings_farm_on": "✅ Фарм поинтов: включен",
     "settings_farm_off": "❌ Фарм поинтов: выключен",
-    "settings_farm_desc_on": "Фарм поинтов: при покрытии комиссий бот закроет и переоткроет пару (если возможность актуальна).",
+    "settings_farm_desc_on": "Фарм поинтов: бот закроет и переоткроет пару, когда накопленный фандинг достигнет <code>{threshold:.2f}%</code> от notional пары (если возможность актуальна).",
     "settings_farm_desc_off": "Фарм поинтов выключен.",
     "enter_size_prompt": "✏️ Введи размер позиции в USD для {target}:",
     "all_exchanges": "всех бирж",
@@ -166,7 +166,7 @@ RU = {
     "auto_close_reason_neg_wait": "нетто APR <code>{apr:+.1f}%</code> не восстановился за <code>{hours:.0f}ч</code>",
     "auto_close_reason_liq": "до ликвидации {exchange} осталось <code>{distance:.1f}%</code> (порог {threshold}%)\nЦена: <code>${mark:.4f}</code> → Ликвидация: <code>${liq:.4f}</code> (плечо {leverage}x)",
     "auto_close_reason_price": "{exchange} ({direction}): цена {direction_str} на <code>{loss:.1f}%</code> от входа\nВход: <code>${entry:.4f}</code> → Сейчас: <code>${current:.4f}</code>",
-    "auto_close_reason_farm": "накопленный фандинг <code>${funding:.4f}</code> покрыл комиссии <code>${fees:.4f}</code>",
+    "auto_close_reason_farm": "накопленный фандинг <code>${funding:.4f}</code> (<code>{funding_pct:.4f}%</code>) достиг порога <code>{threshold:.2f}%</code>",
     "farm_reopen_ok": (
         "♻️ <b>Пара переоткрыта (фарм): {symbol}</b>\n\n"
         "{exch_a} ({dir_a}) + {exch_b} ({dir_b})\n"
@@ -259,7 +259,7 @@ EN = {
     "settings_farm_header": "── Farming Mode ──",
     "settings_farm_on": "✅ Points farming: enabled",
     "settings_farm_off": "❌ Points farming: disabled",
-    "settings_farm_desc_on": "Points farming: when funding covers fees, bot closes and reopens the pair (if opportunity is still valid).",
+    "settings_farm_desc_on": "Points farming: bot closes and reopens the pair when accumulated funding reaches <code>{threshold:.2f}%</code> of pair notional (if opportunity is still valid).",
     "settings_farm_desc_off": "Points farming is disabled.",
     "enter_size_prompt": "✏️ Enter position size in USD for {target}:",
     "all_exchanges": "all exchanges",
@@ -353,7 +353,7 @@ EN = {
     "auto_close_reason_neg_wait": "net APR <code>{apr:+.1f}%</code> did not recover in <code>{hours:.0f}h</code>",
     "auto_close_reason_liq": "{exchange} liquidation distance <code>{distance:.1f}%</code> (threshold {threshold}%)\nPrice: <code>${mark:.4f}</code> → Liquidation: <code>${liq:.4f}</code> (leverage {leverage}x)",
     "auto_close_reason_price": "{exchange} ({direction}): price {direction_str} by <code>{loss:.1f}%</code> from entry\nEntry: <code>${entry:.4f}</code> → Now: <code>${current:.4f}</code>",
-    "auto_close_reason_farm": "accumulated funding <code>${funding:.4f}</code> covered fees <code>${fees:.4f}</code>",
+    "auto_close_reason_farm": "accumulated funding <code>${funding:.4f}</code> (<code>{funding_pct:.4f}%</code>) reached threshold <code>{threshold:.2f}%</code>",
     "farm_reopen_ok": (
         "♻️ <b>Pair reopened (farming): {symbol}</b>\n\n"
         "{exch_a} ({dir_a}) + {exch_b} ({dir_b})\n"

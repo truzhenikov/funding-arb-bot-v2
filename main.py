@@ -73,7 +73,8 @@ _protection_enabled: bool = True
 _neg_apr_hard_close: float = NEG_APR_HARD_CLOSE   # APR ниже этого → мгновенное закрытие
 _neg_apr_hours: float = NEG_APR_WAIT_HOURS        # часов в минусе → закрыть
 _price_close_pct: float = PRICE_AUTO_CLOSE_PCT    # % падения цены → закрыть
-_farm_points_mode: bool = False                   # закрыть/переоткрыть при покрытии комиссий фандингом
+_farm_points_mode: bool = False                   # закрыть/переоткрыть по накопленному фандингу
+_farm_reopen_pct: float = 0.10                   # порог накопленного фандинга в % от notional пары
 
 # История Net APR пар — сколько часов держится положительный результат
 # {"ExchA:ExchB:SYMBOL": {"positive_since": float|None, "dip_since": float|None}}
@@ -96,6 +97,7 @@ _waiting_for_scale_in: tuple | None = None
 _waiting_for_apr_hard: bool = False        # ожидаем ввод порога APR вручную
 _waiting_for_neg_hours: bool = False       # ожидаем ввод часов вручную
 _waiting_for_price_pct: bool = False       # ожидаем ввод % падения цены вручную
+_waiting_for_farm_pct: bool = False        # ожидаем ввод % накопленного фандинга для фарма
 
 # ─── Кнопки ──────────────────────────────────────────────────────────────────
 BTN_POSITIONS = MSG["btn_positions"]
@@ -140,7 +142,7 @@ def get_position_size(exchange_name: str) -> float:
 async def _load_settings():
     """Загружает настройки из БД при старте."""
     global _position_size_mode, _global_position_size, _exchange_sizes, _enabled_exchanges
-    global _protection_enabled, _neg_apr_hard_close, _neg_apr_hours, _price_close_pct, _farm_points_mode
+    global _protection_enabled, _neg_apr_hard_close, _neg_apr_hours, _price_close_pct, _farm_points_mode, _farm_reopen_pct
 
     mode = await load_setting("position_size_mode", "global")
     _position_size_mode = mode
@@ -165,6 +167,7 @@ async def _load_settings():
     _neg_apr_hours = float(await load_setting("neg_apr_hours", str(NEG_APR_WAIT_HOURS)))
     _price_close_pct = float(await load_setting("price_close_pct", str(PRICE_AUTO_CLOSE_PCT)))
     _farm_points_mode = (await load_setting("farm_points_mode", "0")) == "1"
+    _farm_reopen_pct = float(await load_setting("farm_reopen_pct", "0.10"))
 
 
 async def _save_settings():
@@ -178,6 +181,7 @@ async def _save_settings():
     await save_setting("neg_apr_hours", str(_neg_apr_hours))
     await save_setting("price_close_pct", str(_price_close_pct))
     await save_setting("farm_points_mode", "1" if _farm_points_mode else "0")
+    await save_setting("farm_reopen_pct", str(_farm_reopen_pct))
 
 
 # ─── История Net APR пар ─────────────────────────────────────────────────────
@@ -489,12 +493,14 @@ async def _monitor_open_pairs(exchange_rates: dict):
             dummy = type('', (), {'apr': 0})()
             return f"{l['exchange']} <code>{rates_map.get(key, dummy).apr:+.1f}%</code>"
 
-        # ── Режим фарма поинтов: накопили на комиссии → закрыть и переоткрыть ──
+        # ── Режим фарма поинтов: накопили нужный % фандинга → закрыть и переоткрыть ──
         if _farm_points_mode:
             funding_usd, fees_usd, has_funding = await _estimate_pair_funding_and_fees(legs, symbol)
-            if has_funding and fees_usd > 0 and funding_usd >= fees_usd:
+            total_notional = sum(float(l.get("position_size_usd") or 0) for l in legs)
+            funding_pct = (funding_usd / total_notional * 100) if total_notional > 0 else 0.0
+            if has_funding and total_notional > 0 and funding_pct >= _farm_reopen_pct:
                 logger.info(
-                    f"Фарм-режим {symbol}: funding={funding_usd:.4f} >= fees={fees_usd:.4f}, закрываем/переоткрываем"
+                    f"Фарм-режим {symbol}: funding={funding_usd:.4f} ({funding_pct:.4f}%) >= threshold={_farm_reopen_pct:.4f}%, закрываем/переоткрываем"
                 )
                 try:
                     async with _trade_lock:
@@ -504,7 +510,12 @@ async def _monitor_open_pairs(exchange_rates: dict):
                         MSG["auto_close_ok"].format(
                             symbol=symbol,
                             exchanges=exch_names,
-                            reason=MSG["auto_close_reason_farm"].format(funding=funding_usd, fees=fees_usd),
+                            reason=MSG["auto_close_reason_farm"].format(
+                                funding=funding_usd,
+                                fees=fees_usd,
+                                funding_pct=funding_pct,
+                                threshold=_farm_reopen_pct,
+                            ),
                         )
                     )
                 except Exception as e:
@@ -512,7 +523,12 @@ async def _monitor_open_pairs(exchange_rates: dict):
                     await send_message(
                         MSG["auto_close_fail"].format(
                             symbol=symbol,
-                            reason=MSG["auto_close_reason_farm"].format(funding=funding_usd, fees=fees_usd),
+                            reason=MSG["auto_close_reason_farm"].format(
+                                funding=funding_usd,
+                                fees=fees_usd,
+                                funding_pct=funding_pct,
+                                threshold=_farm_reopen_pct,
+                            ),
                             error=e,
                         )
                     )
@@ -991,7 +1007,16 @@ def _build_settings() -> tuple:
             callback_data="toggle_farm_points",
         )
     ])
-    farm_desc = "\n\n" + (MSG["settings_farm_desc_on"] if _farm_points_mode else MSG["settings_farm_desc_off"])
+    _farm_pct_presets = [0.10, 0.12, 0.15, 0.20]
+    rows.append([
+        InlineKeyboardButton(f"{'▶ ' if abs(_farm_reopen_pct - v) < 1e-9 else ''}{v:.2f}%", callback_data=f"set_farm_pct:{v}")
+        for v in _farm_pct_presets
+    ])
+    rows.append([InlineKeyboardButton("✏️ Указать вручную", callback_data="set_farm_pct:manual")])
+    farm_desc = "\n\n" + (
+        MSG["settings_farm_desc_on"].format(threshold=_farm_reopen_pct)
+        if _farm_points_mode else MSG["settings_farm_desc_off"]
+    )
 
     enabled_list = ", ".join(sorted(_enabled_exchanges)) or MSG["settings_none_enabled"]
     text = (
@@ -1376,6 +1401,18 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await _save_settings()
         await _refresh_settings(query)
 
+    elif data.startswith("set_farm_pct:"):
+        global _farm_reopen_pct, _waiting_for_farm_pct
+        val = data.split(":")[1]
+        if val == "manual":
+            _waiting_for_farm_pct = True
+            await query.message.delete()
+            await query.message.chat.send_message("Введи порог накопленного фандинга для перезахода в % (например: 0.12)")
+        else:
+            _farm_reopen_pct = float(val)
+            await _save_settings()
+            await _refresh_settings(query)
+
     elif data.startswith("set_apr_hard:"):
         global _neg_apr_hard_close, _waiting_for_apr_hard
         val = data.split(":")[1]
@@ -1421,7 +1458,7 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обработка текстовых сообщений."""
-    global _waiting_for_size, _waiting_for_scale_in, _waiting_for_apr_hard, _waiting_for_neg_hours, _waiting_for_price_pct
+    global _waiting_for_size, _waiting_for_scale_in, _waiting_for_apr_hard, _waiting_for_neg_hours, _waiting_for_price_pct, _waiting_for_farm_pct
 
     text = update.message.text.strip()
 
@@ -1511,6 +1548,21 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             _price_close_pct = val
             await _save_settings()
             await update.message.reply_text(f"✅ Закрытие при падении цены: <code>{val:.0f}%</code>", parse_mode=ParseMode.HTML)
+        except ValueError:
+            await update.message.reply_text(MSG["enter_number_error"], parse_mode=ParseMode.HTML)
+
+    # Ввод % накопленного фандинга для фарма вручную
+    elif _waiting_for_farm_pct:
+        _waiting_for_farm_pct = False
+        try:
+            val = float(text.replace("%", "").replace(",", "."))
+            if val <= 0 or val > 10:
+                await update.message.reply_text("Введи число от 0.01 до 10")
+                return
+            global _farm_reopen_pct
+            _farm_reopen_pct = val
+            await _save_settings()
+            await update.message.reply_text(f"✅ Порог фарма: <code>{val:.2f}%</code>", parse_mode=ParseMode.HTML)
         except ValueError:
             await update.message.reply_text(MSG["enter_number_error"], parse_mode=ParseMode.HTML)
 
