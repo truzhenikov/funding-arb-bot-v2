@@ -65,6 +65,10 @@ class ExtendedScanner(BaseScanner):
             try:
                 stats = item.get("marketStats") or {}
                 funding_rate = float(stats.get("fundingRate") or 0)
+                # Extended отдаёт fundingRate со знаком со стороны LONG:
+                # positive => лонги платят шортам, значит для унификации сканеров
+                # инвертируем знак, чтобы positive APR в боте всегда означал доход для SHORT.
+                funding_rate = -funding_rate
                 apr = funding_rate * 24 * 365 * 100
 
                 oi = float(stats.get("openInterest") or 0)
@@ -76,6 +80,7 @@ class ExtendedScanner(BaseScanner):
                     or item.get("bid")
                     or stats.get("bestBid")
                     or stats.get("bid")
+                    or stats.get("bidPrice")
                     or 0
                 )
                 ask_price = float(
@@ -83,6 +88,7 @@ class ExtendedScanner(BaseScanner):
                     or item.get("ask")
                     or stats.get("bestAsk")
                     or stats.get("ask")
+                    or stats.get("askPrice")
                     or 0
                 )
                 if bid_price <= 0 or ask_price <= 0:
