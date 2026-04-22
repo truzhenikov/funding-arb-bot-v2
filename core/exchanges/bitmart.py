@@ -36,6 +36,8 @@ class BitMartExecutor(BaseExchangeExecutor):
         ).hexdigest()
         return {
             "Content-Type": "application/json",
+            "User-Agent": "utbot-bitmart/0.1",
+            "Accept": "application/json",
             "X-BM-KEY": self.api_key,
             "X-BM-SIGN": signature,
             "X-BM-TIMESTAMP": timestamp,
@@ -124,9 +126,9 @@ class BitMartExecutor(BaseExchangeExecutor):
         side = 1 if is_long else 4
         body = {
             "symbol": market["symbol"],
-            "client_order_id": f"bm_{int(time.time() * 1000)}",
             "side": side,
             "type": "market",
+            "mode": 1,
             "size": contracts,
         }
         submit = await self._signed_post("/contract/private/submit-order", body)
@@ -171,9 +173,9 @@ class BitMartExecutor(BaseExchangeExecutor):
         side = 3 if was_long else 2
         body = {
             "symbol": market["symbol"],
-            "client_order_id": f"bm_close_{int(time.time() * 1000)}",
             "side": side,
             "type": "market",
+            "mode": 1,
             "size": int(contracts),
         }
         submit = await self._signed_post("/contract/private/submit-order", body)

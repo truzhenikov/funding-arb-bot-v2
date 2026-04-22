@@ -103,7 +103,7 @@ class ExtendedExecutor(BaseExchangeExecutor):
 
         order = create_order_object(
             account=self._stark_account,
-            starknet_domain=self._endpoint_config.starknet_domain,
+            starknet_domain=self._endpoint_config.signing.starknet_domain,
             market=market,
             side=side,
             amount_of_synthetic=qty,
@@ -157,7 +157,7 @@ class ExtendedExecutor(BaseExchangeExecutor):
 
         order = create_order_object(
             account=self._stark_account,
-            starknet_domain=self._endpoint_config.starknet_domain,
+            starknet_domain=self._endpoint_config.signing.starknet_domain,
             market=market,
             side=close_side,
             amount_of_synthetic=qty_dec,
