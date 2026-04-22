@@ -76,9 +76,8 @@ class ExtendedScanner(BaseScanner):
             try:
                 stats = item.get("marketStats") or {}
                 funding_rate = float(stats.get("fundingRate") or 0)
-                # Extended отдаёт fundingRate со знаком со стороны LONG:
-                # positive => лонги платят шортам, значит для унификации сканеров
-                # инвертируем знак, чтобы positive APR в боте всегда означал доход для SHORT.
+                # fundingRate на Extended — отрицательный означает шорты получают funding.
+                # Инвертируем, чтобы в боте positive APR означал доход для SHORT.
                 funding_rate = -funding_rate
                 apr = funding_rate * 24 * 365 * 100
 
