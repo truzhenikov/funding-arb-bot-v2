@@ -1,3 +1,4 @@
+import asyncio
 import logging
 
 import httpx
@@ -18,10 +19,10 @@ class ExtendedScanner(BaseScanner):
     exchange_name = "Extended"
     BASE_URL = "https://api.starknet.extended.exchange/api/v1"
 
-    async def _get_book_top(self, market_name: str) -> tuple[float, float]:
+    async def _get_book_top(self, market_name: str, timeout: float = 2.5) -> tuple[float, float]:
         """Возвращает (best_bid, best_ask) из orderbook."""
         try:
-            async with httpx.AsyncClient(timeout=10) as client:
+            async with httpx.AsyncClient(timeout=timeout) as client:
                 resp = await client.get(
                     f"{self.BASE_URL}/info/orderbook",
                     params={"market": market_name},
@@ -44,6 +45,16 @@ class ExtendedScanner(BaseScanner):
         except Exception as e:
             logger.debug(f"Extended: не удалось получить стакан {market_name}: {e}")
             return 0.0, 0.0
+
+    async def enrich_book_top(self, symbol: str, timeout: float = 2.5) -> dict | None:
+        """Точечно добирает bid/ask для конкретного символа с жёстким таймаутом."""
+        try:
+            market_name = f"{symbol.upper()}-USD"
+            bid, ask = await asyncio.wait_for(self._get_book_top(market_name, timeout=timeout), timeout=timeout + 0.3)
+            return {"symbol": symbol.upper(), "bid_price": bid, "ask_price": ask}
+        except Exception as e:
+            logger.debug(f"Extended: enrich_book_top ошибка для {symbol}: {e}")
+            return None
 
     async def get_funding_rates(self) -> list[FundingRate]:
         try:

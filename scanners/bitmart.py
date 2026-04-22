@@ -1,3 +1,4 @@
+import asyncio
 import logging
 
 import httpx
@@ -13,10 +14,10 @@ class BitMartScanner(BaseScanner):
     exchange_name = "BitMart"
     BASE_URL = "https://api-cloud-v2.bitmart.com"
 
-    async def _get_book_top(self, symbol: str) -> tuple[float, float]:
+    async def _get_book_top(self, symbol: str, timeout: float = 2.5) -> tuple[float, float]:
         """Возвращает (best_bid, best_ask) из depth."""
         try:
-            async with httpx.AsyncClient(timeout=10) as client:
+            async with httpx.AsyncClient(timeout=timeout) as client:
                 resp = await client.get(
                     f"{self.BASE_URL}/contract/public/depth",
                     params={"symbol": f"{symbol.upper()}USDT", "limit": 5},
@@ -40,6 +41,15 @@ class BitMartScanner(BaseScanner):
         except Exception as e:
             logger.debug(f"BitMart: не удалось получить стакан {symbol}: {e}")
             return 0.0, 0.0
+
+    async def enrich_book_top(self, symbol: str, timeout: float = 2.5) -> dict | None:
+        """Точечно добирает bid/ask для конкретного символа с жёстким таймаутом."""
+        try:
+            bid, ask = await asyncio.wait_for(self._get_book_top(symbol, timeout=timeout), timeout=timeout + 0.3)
+            return {"symbol": symbol.upper(), "bid_price": bid, "ask_price": ask}
+        except Exception as e:
+            logger.debug(f"BitMart: enrich_book_top ошибка для {symbol}: {e}")
+            return None
 
     async def get_funding_rates(self) -> list[FundingRate]:
         try:
@@ -65,14 +75,6 @@ class BitMartScanner(BaseScanner):
             except Exception:
                 continue
 
-        # BitMart depth по сотням символов сильно тормозит цикл и подвешивает бота.
-        # Берём book top только для действительно релевантных рынков.
-        parsed.sort(key=lambda x: float(x.get("turnover_24h") or 0), reverse=True)
-        depth_candidates = {
-            (item.get("base_currency") or "").upper()
-            for item in parsed[:120]
-        }
-
         for item in parsed:
             try:
                 symbol = (item.get("base_currency") or "").upper()
@@ -92,8 +94,8 @@ class BitMartScanner(BaseScanner):
                     or item.get("ask")
                     or 0
                 )
-                if (bid_price <= 0 or ask_price <= 0) and symbol in depth_candidates:
-                    bid_price, ask_price = await self._get_book_top(symbol)
+                # Массово depth не дёргаем, чтобы не подвешивать цикл.
+                # Для выбранных пар добираем стакан точечно позже.
 
                 rates.append(FundingRate(
                     exchange="BitMart",

@@ -674,6 +674,34 @@ def _enrich_opp_with_streaks(opp: dict) -> dict:
     return opp
 
 
+async def _enrich_selected_opps_with_books(opps: list[dict], exchange_rates: dict):
+    """Точечно добирает bid/ask только для уже выбранных возможностей."""
+    if not opps:
+        return
+
+    scanner_by_exchange = {s.exchange_name: s for s in ALL_SCANNERS}
+
+    for opp in opps:
+        symbol = opp["symbol"]
+        for exch_key in ("exchange_a", "exchange_b"):
+            exchange_name = opp[exch_key]
+            rates = exchange_rates.get(exchange_name) or []
+            rate = next((r for r in rates if r.symbol == symbol), None)
+            if rate is None:
+                continue
+            if (rate.bid_price or 0) > 0 and (rate.ask_price or 0) > 0:
+                continue
+            scanner = scanner_by_exchange.get(exchange_name)
+            enrich = getattr(scanner, "enrich_book_top", None)
+            if not enrich:
+                continue
+            enriched = await enrich(symbol, timeout=2.5)
+            if not enriched:
+                continue
+            rate.bid_price = float(enriched.get("bid_price") or 0)
+            rate.ask_price = float(enriched.get("ask_price") or 0)
+
+
 async def _scan_opportunities(exchange_rates: dict):
     """Ищет пары и отправляет сигналы."""
     opps = find_pair_opportunities(exchange_rates, _enabled_exchanges)
@@ -684,6 +712,9 @@ async def _scan_opportunities(exchange_rates: dict):
 
     if not opps:
         return
+
+    await _enrich_selected_opps_with_books(opps, exchange_rates)
+    opps = find_pair_opportunities(exchange_rates, _enabled_exchanges)
 
     logger.info(f"Найдено {len(opps)} возможностей")
 
@@ -1098,6 +1129,9 @@ async def scan_manual(update: Update):
     if not opps:
         await msg.edit_text(MSG["no_pairs"])
         return
+
+    await _enrich_selected_opps_with_books(opps, exchange_rates)
+    opps = find_pair_opportunities(exchange_rates, _enabled_exchanges)
 
     await msg.delete()
 
