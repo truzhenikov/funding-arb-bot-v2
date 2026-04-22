@@ -82,8 +82,7 @@ class ExtendedExecutor(BaseExchangeExecutor):
         raise ValueError(f"Extended: mark price для {symbol} не найдена")
 
     async def market_open(self, symbol: str, is_long: bool, size_usd: float) -> dict:
-        from x10.perpetual.order_object import create_order_object
-        from x10.perpetual.orders import OrderSide, TimeInForce
+        from x10.perpetual.trading_client.trading_client import create_order_object, OrderSide, TimeInForce
 
         self._init_client()
         market = await self._get_market(symbol)
@@ -126,8 +125,7 @@ class ExtendedExecutor(BaseExchangeExecutor):
         }
 
     async def market_close(self, symbol: str, size: float = 0, was_long: bool = True) -> dict:
-        from x10.perpetual.order_object import create_order_object
-        from x10.perpetual.orders import OrderSide, TimeInForce
+        from x10.perpetual.trading_client.trading_client import create_order_object, OrderSide, TimeInForce
 
         self._init_client()
         market = await self._get_market(symbol)
