@@ -22,18 +22,20 @@ def _calc_book_spread_pct(rate: FundingRate) -> float | None:
 
 def _calc_leg_execution_slippage_pct(rate: FundingRate, direction: str) -> float | None:
     """
-    Возвращает издержку исполнения market-ордера относительно mark price в %.
+    Возвращает стоимость пересечения стакана market-ордером в %.
     LONG -> покупаем по ask, SHORT -> продаём по bid.
-    Это позволяет считать вход и выход отдельно, не полагаясь на симметрию спреда вокруг mid.
+    Считаем от текущего bid/ask, без mark price.
     """
     bid = float(rate.bid_price or 0)
     ask = float(rate.ask_price or 0)
-    mark = float(rate.mark_price or 0)
-    if bid <= 0 or ask <= 0 or ask < bid or mark <= 0:
+    if bid <= 0 or ask <= 0 or ask < bid:
+        return None
+    mid = (bid + ask) / 2
+    if mid <= 0:
         return None
     if direction == "LONG":
-        return abs((ask - mark) / mark) * 100
-    return abs((mark - bid) / mark) * 100
+        return ((ask - bid) / mid) * 100
+    return ((ask - bid) / mid) * 100
 
 
 def find_pair_opportunities(
