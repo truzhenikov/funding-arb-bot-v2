@@ -32,9 +32,8 @@ class ExtendedExecutor(BaseExchangeExecutor):
         if self._trading_client is not None:
             return
         try:
-            from x10.perpetual.accounts import StarkPerpetualAccount
-            from x10.perpetual.configuration import MAINNET_CONFIG
-            from x10.perpetual.trading_client import PerpetualTradingClient
+            from x10.perpetual.trading_client.trading_client import StarkPerpetualAccount, PerpetualTradingClient
+            from x10.config import MAINNET_CONFIG
         except ImportError:
             raise RuntimeError("x10-python-trading-starknet не установлен: pip install x10-python-trading-starknet")
         self._endpoint_config = MAINNET_CONFIG
@@ -202,10 +201,10 @@ class ExtendedExecutor(BaseExchangeExecutor):
     async def get_balance(self) -> float | None:
         try:
             self._init_client()
-            account = await self._trading_client.account.get_account_info()
+            account = await self._trading_client.account.get_balance()
             if hasattr(account, "data"):
                 data = account.data
-                for key in ("collateral_balance", "equity", "balance", "available_balance"):
+                for key in ("equity", "balance", "available_for_trade", "available_for_withdrawal"):
                     val = getattr(data, key, None)
                     if val is not None:
                         return float(val)
