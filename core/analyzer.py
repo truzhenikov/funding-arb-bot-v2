@@ -20,22 +20,39 @@ def _calc_book_spread_pct(rate: FundingRate) -> float | None:
     return ((ask - bid) / mid) * 100
 
 
-def _calc_leg_execution_slippage_pct(rate: FundingRate, direction: str) -> float | None:
-    """
-    Возвращает стоимость пересечения стакана market-ордером в %.
-    LONG -> покупаем по ask, SHORT -> продаём по bid.
-    Считаем от текущего bid/ask, без mark price.
-    """
+def _get_executable_price(rate: FundingRate, direction: str) -> float | None:
+    """Возвращает исполнимую цену market-ордера для направления позиции."""
     bid = float(rate.bid_price or 0)
     ask = float(rate.ask_price or 0)
     if bid <= 0 or ask <= 0 or ask < bid:
         return None
-    mid = (bid + ask) / 2
-    if mid <= 0:
+    return ask if direction == "LONG" else bid
+
+
+def _calc_cross_exchange_edge_pct(rate_a: FundingRate, dir_a: str, rate_b: FundingRate, dir_b: str) -> float | None:
+    """
+    Считает межбиржевой edge пары в % по исполнимым ценам.
+    Положительное значение = вход/выход в плюс относительно паритета,
+    отрицательное = перекос цен против нас.
+    """
+    px_a = _get_executable_price(rate_a, dir_a)
+    px_b = _get_executable_price(rate_b, dir_b)
+    if px_a is None or px_b is None or px_a <= 0 or px_b <= 0:
         return None
-    if direction == "LONG":
-        return ((ask - bid) / mid) * 100
-    return ((ask - bid) / mid) * 100
+
+    if dir_a == "LONG" and dir_b == "SHORT":
+        base = (px_a + px_b) / 2
+        if base <= 0:
+            return None
+        return ((px_b - px_a) / base) * 100
+
+    if dir_a == "SHORT" and dir_b == "LONG":
+        base = (px_a + px_b) / 2
+        if base <= 0:
+            return None
+        return ((px_a - px_b) / base) * 100
+
+    return None
 
 
 def find_pair_opportunities(
@@ -111,20 +128,11 @@ def find_pair_opportunities(
 
                 spread_a = _calc_book_spread_pct(rate_a)
                 spread_b = _calc_book_spread_pct(rate_b)
-                entry_slippage_a = _calc_leg_execution_slippage_pct(rate_a, dir_a)
-                entry_slippage_b = _calc_leg_execution_slippage_pct(rate_b, dir_b)
                 exit_dir_a = "SHORT" if dir_a == "LONG" else "LONG"
                 exit_dir_b = "SHORT" if dir_b == "LONG" else "LONG"
-                exit_slippage_a = _calc_leg_execution_slippage_pct(rate_a, exit_dir_a)
-                exit_slippage_b = _calc_leg_execution_slippage_pct(rate_b, exit_dir_b)
 
-                entry_spread = None
-                if entry_slippage_a is not None and entry_slippage_b is not None:
-                    entry_spread = entry_slippage_a + entry_slippage_b
-
-                exit_spread = None
-                if exit_slippage_a is not None and exit_slippage_b is not None:
-                    exit_spread = exit_slippage_a + exit_slippage_b
+                entry_spread = _calc_cross_exchange_edge_pct(rate_a, dir_a, rate_b, dir_b)
+                exit_spread = _calc_cross_exchange_edge_pct(rate_a, exit_dir_a, rate_b, exit_dir_b)
 
                 opportunities.append({
                     "symbol": symbol,

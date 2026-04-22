@@ -61,7 +61,7 @@ async def send_pair_signal(opp: dict, size_usd: float = 0) -> None:
         if hours is None:
             return ""
         if hours < 1:
-            return " ⏱ <1ч"
+            return " ⏱ &lt;1ч"
         if hours < 24:
             return f" ⏱ {hours:.0f}ч"
         return f" ⏱ {hours / 24:.1f}д"
@@ -69,8 +69,8 @@ async def send_pair_signal(opp: dict, size_usd: float = 0) -> None:
     spread_block = ""
     if entry_spread is not None and exit_spread is not None:
         spread_block = (
-            f"\n{MSG['signal_entry_spread']}: <code>{entry_spread:.4f}%</code>"
-            f"\n{MSG['signal_exit_spread']}: <code>{exit_spread:.4f}%</code>"
+            f"\n{MSG['signal_entry_spread']}: <code>{entry_spread:+.4f}%</code>"
+            f"\n{MSG['signal_exit_spread']}: <code>{exit_spread:+.4f}%</code>"
         )
 
     text = (
