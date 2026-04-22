@@ -53,7 +53,6 @@ class BitMartScanner(BaseScanner):
         symbols = ((payload or {}).get("data") or {}).get("symbols") or []
         rates: list[FundingRate] = []
 
-        # Чтобы не спамить API depth, ограничимся активными символами по объёму
         parsed = []
         for item in symbols:
             try:
@@ -65,6 +64,14 @@ class BitMartScanner(BaseScanner):
                 parsed.append(item)
             except Exception:
                 continue
+
+        # BitMart depth по сотням символов сильно тормозит цикл и подвешивает бота.
+        # Берём book top только для действительно релевантных рынков.
+        parsed.sort(key=lambda x: float(x.get("turnover_24h") or 0), reverse=True)
+        depth_candidates = {
+            (item.get("base_currency") or "").upper()
+            for item in parsed[:120]
+        }
 
         for item in parsed:
             try:
@@ -85,7 +92,7 @@ class BitMartScanner(BaseScanner):
                     or item.get("ask")
                     or 0
                 )
-                if bid_price <= 0 or ask_price <= 0:
+                if (bid_price <= 0 or ask_price <= 0) and symbol in depth_candidates:
                     bid_price, ask_price = await self._get_book_top(symbol)
 
                 rates.append(FundingRate(
