@@ -20,6 +20,23 @@ def _calc_book_spread_pct(rate: FundingRate) -> float | None:
     return ((ask - bid) / mid) * 100
 
 
+def _calc_leg_execution_slippage_pct(rate: FundingRate, direction: str) -> float | None:
+    """
+    Возвращает издержку исполнения market-ордера относительно mid в %.
+    LONG -> покупаем по ask, SHORT -> продаём по bid.
+    """
+    bid = float(rate.bid_price or 0)
+    ask = float(rate.ask_price or 0)
+    if bid <= 0 or ask <= 0 or ask < bid:
+        return None
+    mid = (bid + ask) / 2
+    if mid <= 0:
+        return None
+    if direction == "LONG":
+        return ((ask - mid) / mid) * 100
+    return ((mid - bid) / mid) * 100
+
+
 def find_pair_opportunities(
     exchange_rates: dict[str, list[FundingRate]],
     enabled_exchanges: set[str] | None = None,
@@ -93,10 +110,20 @@ def find_pair_opportunities(
 
                 spread_a = _calc_book_spread_pct(rate_a)
                 spread_b = _calc_book_spread_pct(rate_b)
-                pair_spread = None
-                if spread_a is not None and spread_b is not None:
-                    # Для входа и выхода пары берём суммарный bid/ask-спред по обеим ногам.
-                    pair_spread = spread_a + spread_b
+                entry_slippage_a = _calc_leg_execution_slippage_pct(rate_a, dir_a)
+                entry_slippage_b = _calc_leg_execution_slippage_pct(rate_b, dir_b)
+                exit_dir_a = "SHORT" if dir_a == "LONG" else "LONG"
+                exit_dir_b = "SHORT" if dir_b == "LONG" else "LONG"
+                exit_slippage_a = _calc_leg_execution_slippage_pct(rate_a, exit_dir_a)
+                exit_slippage_b = _calc_leg_execution_slippage_pct(rate_b, exit_dir_b)
+
+                entry_spread = None
+                if entry_slippage_a is not None and entry_slippage_b is not None:
+                    entry_spread = entry_slippage_a + entry_slippage_b
+
+                exit_spread = None
+                if exit_slippage_a is not None and exit_slippage_b is not None:
+                    exit_spread = exit_slippage_a + exit_slippage_b
 
                 opportunities.append({
                     "symbol": symbol,
@@ -108,8 +135,8 @@ def find_pair_opportunities(
                     "apr_b": rate_b.apr,
                     "net_apr": round(net_apr, 1),
                     "mark_price": rate_a.mark_price or rate_b.mark_price,
-                    "entry_spread_pct": round(pair_spread, 4) if pair_spread is not None else None,
-                    "exit_spread_pct": round(pair_spread, 4) if pair_spread is not None else None,
+                    "entry_spread_pct": round(entry_spread, 4) if entry_spread is not None else None,
+                    "exit_spread_pct": round(exit_spread, 4) if exit_spread is not None else None,
                     "spread_a_pct": round(spread_a, 4) if spread_a is not None else None,
                     "spread_b_pct": round(spread_b, 4) if spread_b is not None else None,
                 })
