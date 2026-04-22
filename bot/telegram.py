@@ -25,7 +25,7 @@ EXCHANGE_FEES = {
     "Hyperliquid": "0.05%",
     "GRVT": "0.03%",
     "Aster": "0.04%",
-    "BitMart": "0.06%",
+    "BitMart": "0.1%",
     "Extended": "0.025%",
 }
 
