@@ -25,6 +25,8 @@ EXCHANGE_FEES = {
     "Hyperliquid": "0.05%",
     "GRVT": "0.03%",
     "Aster": "0.04%",
+    "BitMart": "0.06%",
+    "Extended": "0.025%",
 }
 
 
@@ -48,9 +50,12 @@ async def send_pair_signal(opp: dict, size_usd: float = 0) -> None:
     fee_a = EXCHANGE_FEES.get(exch_a, "?")
     fee_b = EXCHANGE_FEES.get(exch_b, "?")
     net_apr = opp['net_apr']
+    net_24h_pct = net_apr / 365.0
 
     # Стрик пары — как давно Net APR положительный
     pair_streak = opp.get("pair_streak")
+    entry_spread = opp.get("entry_spread_pct")
+    exit_spread = opp.get("exit_spread_pct")
 
     def _pair_streak_str(hours: float | None) -> str:
         if hours is None:
@@ -61,12 +66,21 @@ async def send_pair_signal(opp: dict, size_usd: float = 0) -> None:
             return f" ⏱ {hours:.0f}ч"
         return f" ⏱ {hours / 24:.1f}д"
 
+    spread_block = ""
+    if entry_spread is not None and exit_spread is not None:
+        spread_block = (
+            f"\n{MSG['signal_entry_spread']}: <code>{entry_spread:.4f}%</code>"
+            f"\n{MSG['signal_exit_spread']}: <code>{exit_spread:.4f}%</code>"
+        )
+
     text = (
         f"🔀 <b>{esc(symbol)}</b> — {esc(exch_a)} × {esc(exch_b)}\n\n"
         f"{esc(exch_a)} ({dir_a_str}): <code>{eff_a:+.1f}%</code>\n"
         f"{esc(exch_b)} ({dir_b_str}): <code>{eff_b:+.1f}%</code>\n"
-        f"{MSG['signal_net_apr']}: ~{net_apr:.1f}% APR{_pair_streak_str(pair_streak)}\n\n"
+        f"{MSG['signal_net_apr']}: <code>{net_apr:.1f}% APR</code>{_pair_streak_str(pair_streak)}\n"
+        f"{MSG['signal_net_24h_pct']}: <code>{net_24h_pct:+.4f}%</code>\n\n"
         f"💸 {esc(exch_a)}: {fee_a} {MSG['signal_fee']} | {esc(exch_b)}: {fee_b}"
+        f"{spread_block}"
     )
 
     keyboard = InlineKeyboardMarkup([[

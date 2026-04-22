@@ -8,6 +8,18 @@ from config import MIN_PAIR_APR, MIN_VOLUME_USD
 logger = logging.getLogger(__name__)
 
 
+def _calc_book_spread_pct(rate: FundingRate) -> float | None:
+    """Возвращает bid/ask спред в %, если стакан доступен."""
+    bid = float(rate.bid_price or 0)
+    ask = float(rate.ask_price or 0)
+    if bid <= 0 or ask <= 0 or ask < bid:
+        return None
+    mid = (bid + ask) / 2
+    if mid <= 0:
+        return None
+    return ((ask - bid) / mid) * 100
+
+
 def find_pair_opportunities(
     exchange_rates: dict[str, list[FundingRate]],
     enabled_exchanges: set[str] | None = None,
@@ -79,6 +91,13 @@ def find_pair_opportunities(
                 if net_apr < min_pair_apr:
                     continue
 
+                spread_a = _calc_book_spread_pct(rate_a)
+                spread_b = _calc_book_spread_pct(rate_b)
+                pair_spread = None
+                if spread_a is not None and spread_b is not None:
+                    # Для входа и выхода пары берём суммарный bid/ask-спред по обеим ногам.
+                    pair_spread = spread_a + spread_b
+
                 opportunities.append({
                     "symbol": symbol,
                     "exchange_a": exch_a,
@@ -89,6 +108,10 @@ def find_pair_opportunities(
                     "apr_b": rate_b.apr,
                     "net_apr": round(net_apr, 1),
                     "mark_price": rate_a.mark_price or rate_b.mark_price,
+                    "entry_spread_pct": round(pair_spread, 4) if pair_spread is not None else None,
+                    "exit_spread_pct": round(pair_spread, 4) if pair_spread is not None else None,
+                    "spread_a_pct": round(spread_a, 4) if spread_a is not None else None,
+                    "spread_b_pct": round(spread_b, 4) if spread_b is not None else None,
                 })
 
     opportunities.sort(key=lambda x: x["net_apr"], reverse=True)

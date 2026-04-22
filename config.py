@@ -36,6 +36,17 @@ GRVT_TRADING_ACCOUNT_ID = os.getenv("GRVT_TRADING_ACCOUNT_ID", "")  # Sub-accoun
 ASTER_API_KEY = os.getenv("ASTER_API_KEY", "")
 ASTER_API_SECRET = os.getenv("ASTER_API_SECRET", "")
 
+# BitMart Futures
+BITMART_API_KEY = os.getenv("BITMART_API_KEY", "")
+BITMART_API_SECRET = os.getenv("BITMART_API_SECRET", "")
+BITMART_API_MEMO = os.getenv("BITMART_API_MEMO", "")
+
+# Extended Exchange (StarkNet)
+EXTENDED_API_KEY = os.getenv("EXTENDED_API_KEY", "")
+EXTENDED_PUBLIC_KEY = os.getenv("EXTENDED_PUBLIC_KEY", "")
+EXTENDED_PRIVATE_KEY = os.getenv("EXTENDED_PRIVATE_KEY", "")
+EXTENDED_VAULT_ID = int(os.getenv("EXTENDED_VAULT_ID", "0"))
+
 # Защита: пороги автозакрытия
 LIQ_WARN_PCT = 20.0           # % до ликвидации → предупреждение
 LIQ_AUTO_CLOSE_PCT = 15.0     # % до ликвидации → автозакрытие
@@ -58,4 +69,6 @@ EXCHANGES = {
     "hyperliquid": "Hyperliquid",
     "grvt": "GRVT",
     "aster": "Aster",
+    "bitmart": "BitMart",
+    "extended": "Extended",
 }

@@ -11,6 +11,8 @@ class FundingRate:
     open_interest_usd: float = 0.0  # открытый интерес в долларах
     volume_usd: float = 0.0         # дневной объём торгов в долларах
     mark_price: float = 0.0         # текущая рыночная цена
+    bid_price: float = 0.0          # лучший bid из стакана
+    ask_price: float = 0.0          # лучший ask из стакана
 
 
 class BaseScanner:

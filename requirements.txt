@@ -8,3 +8,4 @@ lighter-sdk
 hyperliquid-python-sdk
 eth-account>=0.11.0
 grvt-pysdk
+x10-python-trading-starknet

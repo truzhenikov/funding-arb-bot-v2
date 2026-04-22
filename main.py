@@ -13,7 +13,7 @@ from telegram.ext import Application, CallbackQueryHandler, CommandHandler, Mess
 from telegram.constants import ParseMode
 
 from config import (
-    SCAN_INTERVAL_SECONDS, TELEGRAM_TOKEN, TELEGRAM_CHAT_ID, POSITION_SIZE_USD,
+    SCAN_INTERVAL_SECONDS, TELEGRAM_TOKEN, TELEGRAM_CHAT_ID, POSITION_SIZE_USD, MIN_PAIR_APR,
     AUTHOR_CHANNEL, AUTHOR_CHANNEL_NAME, DONATION_WALLET_EVM, DONATION_WALLET_SOL,
     EXCHANGES, LIQ_WARN_PCT, LIQ_AUTO_CLOSE_PCT, PRICE_WARN_PCT, PRICE_AUTO_CLOSE_PCT,
     NEG_APR_HARD_CLOSE, NEG_APR_WAIT_HOURS, BOT_LANG,
@@ -25,6 +25,8 @@ from scanners.backpack import BackpackScanner
 from scanners.lighter import LighterScanner
 from scanners.grvt import GRVTScanner
 from scanners.aster import AsterScanner
+from scanners.bitmart import BitMartScanner
+from scanners.extended import ExtendedScanner
 from core.analyzer import find_pair_opportunities, calc_net_apr_for_pair
 from core.executor import open_pair, close_pair, scale_in_pair, get_executor
 from bot.telegram import send_pair_signal, send_message, send_message_get_id
@@ -71,6 +73,7 @@ _protection_enabled: bool = True
 _neg_apr_hard_close: float = NEG_APR_HARD_CLOSE   # APR ниже этого → мгновенное закрытие
 _neg_apr_hours: float = NEG_APR_WAIT_HOURS        # часов в минусе → закрыть
 _price_close_pct: float = PRICE_AUTO_CLOSE_PCT    # % падения цены → закрыть
+_farm_points_mode: bool = False                   # закрыть/переоткрыть при покрытии комиссий фандингом
 
 # История Net APR пар — сколько часов держится положительный результат
 # {"ExchA:ExchB:SYMBOL": {"positive_since": float|None, "dip_since": float|None}}
@@ -109,6 +112,8 @@ ALL_SCANNERS = [
     HyperliquidScanner(),
     GRVTScanner(),
     AsterScanner(),
+    BitMartScanner(),
+    ExtendedScanner(),
 ]
 
 
@@ -135,7 +140,7 @@ def get_position_size(exchange_name: str) -> float:
 async def _load_settings():
     """Загружает настройки из БД при старте."""
     global _position_size_mode, _global_position_size, _exchange_sizes, _enabled_exchanges
-    global _protection_enabled, _neg_apr_hard_close, _neg_apr_hours, _price_close_pct
+    global _protection_enabled, _neg_apr_hard_close, _neg_apr_hours, _price_close_pct, _farm_points_mode
 
     mode = await load_setting("position_size_mode", "global")
     _position_size_mode = mode
@@ -159,6 +164,7 @@ async def _load_settings():
     _neg_apr_hard_close = float(await load_setting("neg_apr_hard_close", str(NEG_APR_HARD_CLOSE)))
     _neg_apr_hours = float(await load_setting("neg_apr_hours", str(NEG_APR_WAIT_HOURS)))
     _price_close_pct = float(await load_setting("price_close_pct", str(PRICE_AUTO_CLOSE_PCT)))
+    _farm_points_mode = (await load_setting("farm_points_mode", "0")) == "1"
 
 
 async def _save_settings():
@@ -171,6 +177,7 @@ async def _save_settings():
     await save_setting("neg_apr_hard_close", str(_neg_apr_hard_close))
     await save_setting("neg_apr_hours", str(_neg_apr_hours))
     await save_setting("price_close_pct", str(_price_close_pct))
+    await save_setting("farm_points_mode", "1" if _farm_points_mode else "0")
 
 
 # ─── История Net APR пар ─────────────────────────────────────────────────────
@@ -371,6 +378,85 @@ async def _handle_orphan_leg(pair_id: str, symbol: str, leg: dict):
 
 # ─── Мониторинг открытых пар ─────────────────────────────────────────────────
 
+async def _estimate_pair_funding_and_fees(legs: list[dict], symbol: str) -> tuple[float, float, bool]:
+    """Возвращает (funding_usd, fees_usd, has_funding_data)."""
+    opened_at = legs[0].get("opened_at") or time.time()
+    opened_ago_h = max((time.time() - opened_at) / 3600, 0)
+
+    total_funding = 0.0
+    has_funding_data = False
+    total_fees = 0.0
+
+    for leg in legs:
+        exch = leg["exchange"]
+        size_usd = float(leg.get("position_size_usd") or 0)
+
+        # Комиссии за круг: вход + выход.
+        try:
+            total_fees += size_usd * get_executor(exch).fee_rate * 2
+        except Exception:
+            pass
+
+        avg_rate = await get_avg_rate_since(exch, symbol, opened_at)
+        if avg_rate is None:
+            continue
+        sign = 1 if leg["direction"] == "SHORT" else -1
+        total_funding += sign * avg_rate * opened_ago_h * size_usd
+        has_funding_data = True
+
+    return total_funding, total_fees, has_funding_data
+
+
+def _get_leg_apr_from_map(rates_map: dict, exchange: str, symbol: str) -> float | None:
+    rate = rates_map.get(f"{exchange}:{symbol}")
+    return rate.apr if rate else None
+
+
+async def _reopen_pair_after_farm(symbol: str, legs: list[dict], rates_map: dict):
+    """Переоткрывает пару без подтверждения, если возможность всё ещё актуальна."""
+    exch_a = legs[0]["exchange"]
+    exch_b = legs[1]["exchange"]
+    rate_a = _get_leg_apr_from_map(rates_map, exch_a, symbol)
+    rate_b = _get_leg_apr_from_map(rates_map, exch_b, symbol)
+
+    # Если в текущем снапшоте нет ставок, пробуем отдельно дотянуть свежие.
+    if rate_a is None or rate_b is None:
+        fresh = await _fetch_rates_for_symbol(symbol, exch_a, exch_b)
+        if fresh:
+            rate_a, rate_b = fresh
+
+    if rate_a is None or rate_b is None:
+        await send_message(MSG["farm_reopen_skip"].format(symbol=symbol, apr=0.0))
+        return
+
+    from core.analyzer import _calc_pair_apr
+    net_apr, dir_a, dir_b = _calc_pair_apr(rate_a, rate_b)
+    if net_apr < MIN_PAIR_APR:
+        await send_message(MSG["farm_reopen_skip"].format(symbol=symbol, apr=net_apr))
+        return
+
+    size = min(float(leg.get("position_size_usd") or 0) for leg in legs)
+    if size <= 0:
+        size = min(get_position_size(exch_a), get_position_size(exch_b))
+
+    try:
+        async with _trade_lock:
+            await open_pair(exch_a, exch_b, symbol, dir_a, dir_b, size, entry_apr=net_apr)
+        await send_message(
+            MSG["farm_reopen_ok"].format(
+                symbol=symbol,
+                exch_a=exch_a,
+                exch_b=exch_b,
+                dir_a=dir_a,
+                dir_b=dir_b,
+                size=size,
+                apr=net_apr,
+            )
+        )
+    except Exception as e:
+        await send_message(MSG["farm_reopen_fail"].format(symbol=symbol, error=e))
+
+
 async def _monitor_open_pairs(exchange_rates: dict):
     """Универсальный мониторинг всех открытых пар: фандинг + ликвидация."""
     pairs = await get_open_pairs()
@@ -402,6 +488,38 @@ async def _monitor_open_pairs(exchange_rates: dict):
             key = l['exchange'] + ':' + symbol
             dummy = type('', (), {'apr': 0})()
             return f"{l['exchange']} <code>{rates_map.get(key, dummy).apr:+.1f}%</code>"
+
+        # ── Режим фарма поинтов: накопили на комиссии → закрыть и переоткрыть ──
+        if _farm_points_mode:
+            funding_usd, fees_usd, has_funding = await _estimate_pair_funding_and_fees(legs, symbol)
+            if has_funding and fees_usd > 0 and funding_usd >= fees_usd:
+                logger.info(
+                    f"Фарм-режим {symbol}: funding={funding_usd:.4f} >= fees={fees_usd:.4f}, закрываем/переоткрываем"
+                )
+                try:
+                    async with _trade_lock:
+                        await close_pair(pair_id=pair_id, symbol=symbol, legs=legs)
+                    exch_names = " × ".join(l["exchange"] for l in legs)
+                    await send_message(
+                        MSG["auto_close_ok"].format(
+                            symbol=symbol,
+                            exchanges=exch_names,
+                            reason=MSG["auto_close_reason_farm"].format(funding=funding_usd, fees=fees_usd),
+                        )
+                    )
+                except Exception as e:
+                    logger.error(f"Фарм-автозакрытие {pair_id} ({symbol}) провалилось: {e}")
+                    await send_message(
+                        MSG["auto_close_fail"].format(
+                            symbol=symbol,
+                            reason=MSG["auto_close_reason_farm"].format(funding=funding_usd, fees=fees_usd),
+                            error=e,
+                        )
+                    )
+                    continue
+
+                await _reopen_pair_after_farm(symbol, legs, rates_map)
+                continue
 
         # ── Проверка APR ─────────────────────────────────────────────────────
         if not _protection_enabled:
@@ -575,7 +693,8 @@ async def _scan_opportunities(exchange_rates: dict):
             continue
 
         _enrich_opp_with_streaks(opp)
-        await send_pair_signal(opp)
+        signal_size = min(get_position_size(opp["exchange_a"]), get_position_size(opp["exchange_b"]))
+        await send_pair_signal(opp, size_usd=signal_size)
         _sent_signals[signal_key] = (opp["net_apr"], time.time())
 
 
@@ -833,12 +952,23 @@ def _build_settings() -> tuple:
     else:
         prot_desc = "\n\n⚠️ Защита выключена — автозакрытие не работает"
 
+    # Секция фарма поинтов
+    rows.append([InlineKeyboardButton(MSG["settings_farm_header"], callback_data="noop")])
+    rows.append([
+        InlineKeyboardButton(
+            MSG["settings_farm_on"] if _farm_points_mode else MSG["settings_farm_off"],
+            callback_data="toggle_farm_points",
+        )
+    ])
+    farm_desc = "\n\n" + (MSG["settings_farm_desc_on"] if _farm_points_mode else MSG["settings_farm_desc_off"])
+
     enabled_list = ", ".join(sorted(_enabled_exchanges)) or MSG["settings_none_enabled"]
     text = (
         f"{MSG['settings_title']}\n\n"
         f"{MSG['settings_enabled']}: {enabled_list}\n"
         f"{desc}"
         f"{prot_desc}"
+        f"{farm_desc}"
     )
     return text, InlineKeyboardMarkup(rows)
 
@@ -975,7 +1105,8 @@ async def scan_manual(update: Update):
     _update_pair_net_streaks(all_positive)
     for opp in opps:
         _enrich_opp_with_streaks(opp)
-        await send_pair_signal(opp)
+        signal_size = min(get_position_size(opp["exchange_a"]), get_position_size(opp["exchange_b"]))
+        await send_pair_signal(opp, size_usd=signal_size)
 
     # Итоговое сообщение
     min_apr = opps[-1]["net_apr"]
@@ -1202,6 +1333,12 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not _protection_enabled:
             # Сбрасываем таймеры — иначе при повторном включении пары закроются мгновенно
             _negative_funding_since.clear()
+        await _save_settings()
+        await _refresh_settings(query)
+
+    elif data == "toggle_farm_points":
+        global _farm_points_mode
+        _farm_points_mode = not _farm_points_mode
         await _save_settings()
         await _refresh_settings(query)
 

@@ -59,6 +59,32 @@ def get_executor(exchange_name: str) -> BaseExchangeExecutor:
             raise RuntimeError("Aster API ключ не задан в .env")
         executor = AsterExecutor(cfg.ASTER_API_KEY, cfg.ASTER_API_SECRET)
 
+    elif exchange_name == "BitMart":
+        from core.exchanges.bitmart import BitMartExecutor
+        if not cfg.BITMART_API_KEY or not cfg.BITMART_API_SECRET or not cfg.BITMART_API_MEMO:
+            raise RuntimeError("BitMart API ключи не заданы в .env")
+        executor = BitMartExecutor(
+            cfg.BITMART_API_KEY,
+            cfg.BITMART_API_SECRET,
+            cfg.BITMART_API_MEMO,
+        )
+
+    elif exchange_name == "Extended":
+        from core.exchanges.extended import ExtendedExecutor
+        if (
+            not cfg.EXTENDED_API_KEY
+            or not cfg.EXTENDED_PUBLIC_KEY
+            or not cfg.EXTENDED_PRIVATE_KEY
+            or not cfg.EXTENDED_VAULT_ID
+        ):
+            raise RuntimeError("Extended API ключи/параметры не заданы в .env")
+        executor = ExtendedExecutor(
+            cfg.EXTENDED_API_KEY,
+            cfg.EXTENDED_PUBLIC_KEY,
+            cfg.EXTENDED_PRIVATE_KEY,
+            cfg.EXTENDED_VAULT_ID,
+        )
+
     else:
         raise ValueError(f"Неизвестная биржа: {exchange_name}")
 
