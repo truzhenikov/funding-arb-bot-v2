@@ -541,17 +541,7 @@ async def _monitor_open_pairs(exchange_rates: dict):
         if not _protection_enabled:
             continue
 
-        if net_apr < _neg_apr_hard_close:
-            logger.warning(f"Автозакрытие {symbol}: нетто APR={net_apr:.1f}%")
-            _negative_funding_since.pop(pair_id, None)
-            apr_details = " | ".join(_leg_apr_str(l) for l in legs)
-            await _auto_close_pair(
-                pair_id, symbol, legs,
-                reason=MSG["auto_close_reason_neg_apr"].format(apr=net_apr, threshold=_neg_apr_hard_close, details=apr_details),
-            )
-            continue
-
-        elif net_apr < 0:
+        if net_apr < 0:
             if pair_id not in _negative_funding_since:
                 _negative_funding_since[pair_id] = time.time()
                 alert_key = f"alert:{pair_id}:negative"
@@ -573,9 +563,21 @@ async def _monitor_open_pairs(exchange_rates: dict):
                 if hours_waited >= _neg_apr_hours:
                     logger.warning(f"Автозакрытие {symbol}: фандинг в минусе {hours_waited:.1f}ч")
                     _negative_funding_since.pop(pair_id, None)
+                    apr_details = " | ".join(_leg_apr_str(l) for l in legs)
+                    if net_apr < _neg_apr_hard_close:
+                        reason = (
+                            MSG["auto_close_reason_neg_apr"].format(
+                                apr=net_apr,
+                                threshold=_neg_apr_hard_close,
+                                details=apr_details,
+                            )
+                            + f"\nОжидание <code>{hours_waited:.1f}ч</code> истекло."
+                        )
+                    else:
+                        reason = MSG["auto_close_reason_neg_wait"].format(apr=net_apr, hours=hours_waited)
                     await _auto_close_pair(
                         pair_id, symbol, legs,
-                        reason=MSG["auto_close_reason_neg_wait"].format(apr=net_apr, hours=hours_waited),
+                        reason=reason,
                     )
                     continue
         else:
