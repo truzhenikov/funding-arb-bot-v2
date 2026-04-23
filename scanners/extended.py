@@ -76,9 +76,6 @@ class ExtendedScanner(BaseScanner):
             try:
                 stats = item.get("marketStats") or {}
                 funding_rate = float(stats.get("fundingRate") or 0)
-                # fundingRate на Extended — отрицательный означает шорты получают funding.
-                # Инвертируем, чтобы в боте positive APR означал доход для SHORT.
-                funding_rate = -funding_rate
                 apr = funding_rate * 24 * 365 * 100
 
                 oi = float(stats.get("openInterest") or 0)
